@@ -3,6 +3,10 @@ name = "rp_hsm"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+debug-console = []
+
 [dependencies]
 embedded-hal = "1.0.0"
 heapless = "0.8.0"
@@ -17,3 +21,26 @@ rp235x-hal = { git = "https://github.com/rp-rs/rp-hal", version = "0.4.0", featu
 panic-halt = "1.0.0"
 rp-binary-info = "0.1.0"
 critical-section = "1.2.0"
+
+[profile.dev]
+panic = "abort"
+overflow-checks = true
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = "fat"
+overflow-checks = true
+strip = "symbols"
+
+[lints.rust]
+rust_2018_idioms = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"

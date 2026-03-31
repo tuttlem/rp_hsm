@@ -3,13 +3,15 @@ use core::fmt::{self, Write};
 
 use critical_section::Mutex;
 use heapless::Deque;
+#[cfg(feature = "debug-console")]
 use usb_device::bus::UsbBus;
+#[cfg(feature = "debug-console")]
 use usbd_serial::SerialPort;
 
 #[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => {
-        $crate::logging::_print(core::format_args!($($arg)*))
+        $crate::logging::print_args(core::format_args!($($arg)*))
     };
 }
 
@@ -45,11 +47,12 @@ impl Write for Logger {
     }
 }
 
-pub fn _print(args: fmt::Arguments<'_>) {
+pub fn print_args(args: fmt::Arguments<'_>) {
     let mut logger = Logger;
     let _ = logger.write_fmt(args);
 }
 
+#[cfg(feature = "debug-console")]
 pub fn flush<B: UsbBus>(serial: &mut SerialPort<'_, B>) {
     let mut chunk = [0u8; 64];
     let mut count = 0usize;
@@ -91,3 +94,6 @@ pub fn flush<B: UsbBus>(serial: &mut SerialPort<'_, B>) {
         _ => {}
     }
 }
+
+#[cfg(not(feature = "debug-console"))]
+pub fn flush() {}
