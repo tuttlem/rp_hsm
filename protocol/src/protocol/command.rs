@@ -1,15 +1,10 @@
-use super::state::{DeviceState, SessionState};
+use super::state::{AuthorityRole, DeviceState, SessionState};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandFamily {
     Discovery,
     Status,
-    Provisioning,
-    Administration,
-    KeyManagement,
-    CryptographicOperations,
-    Audit,
-    FirmwareUpdate,
+    Lifecycle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,8 +13,16 @@ pub enum CommandId {
     GetProtocolVersion = 0x01,
     GetDeviceStatus = 0x02,
     GetCommandCatalog = 0x03,
-    ProvisionDevice = 0x80,
-    FactoryReset = 0x81,
+    GetLifecycleStatus = 0x04,
+    BeginProvisioning = 0x80,
+    FinalizeProvisioning = 0x81,
+    LockDevice = 0x82,
+    UnlockDevice = 0x83,
+    EnterRecovery = 0x84,
+    RecoverToProvisioned = 0x85,
+    ReactivateRecoveredProvisioning = 0x86,
+    ExecuteZeroize = 0x87,
+    DeveloperResetLifecycle = 0x88,
 }
 
 impl CommandId {
@@ -29,8 +32,16 @@ impl CommandId {
             0x01 => Some(Self::GetProtocolVersion),
             0x02 => Some(Self::GetDeviceStatus),
             0x03 => Some(Self::GetCommandCatalog),
-            0x80 => Some(Self::ProvisionDevice),
-            0x81 => Some(Self::FactoryReset),
+            0x04 => Some(Self::GetLifecycleStatus),
+            0x80 => Some(Self::BeginProvisioning),
+            0x81 => Some(Self::FinalizeProvisioning),
+            0x82 => Some(Self::LockDevice),
+            0x83 => Some(Self::UnlockDevice),
+            0x84 => Some(Self::EnterRecovery),
+            0x85 => Some(Self::RecoverToProvisioned),
+            0x86 => Some(Self::ReactivateRecoveredProvisioning),
+            0x87 => Some(Self::ExecuteZeroize),
+            0x88 => Some(Self::DeveloperResetLifecycle),
             _ => None,
         }
     }
@@ -55,34 +66,44 @@ pub struct CommandDefinition {
     pub min_payload_len: usize,
     pub max_payload_len: usize,
     pub allowed_device_states: &'static [DeviceState],
-    pub required_session_state: SessionState,
+    pub required_role: AuthorityRole,
     pub replay_policy: ReplayPolicy,
     pub idempotency_policy: IdempotencyPolicy,
     pub enabled: bool,
+    pub developer_only: bool,
 }
 
-const ANY_NON_FAILED: &[DeviceState] = &[
-    DeviceState::Ready,
+const ALL_STATES: &[DeviceState] = &[
+    DeviceState::Factory,
+    DeviceState::Provisioned,
     DeviceState::Operational,
     DeviceState::Locked,
+    DeviceState::Recovery,
+    DeviceState::Zeroized,
 ];
-const STATUS_STATES: &[DeviceState] = &[
-    DeviceState::Ready,
-    DeviceState::Operational,
-    DeviceState::Locked,
-];
+const FACTORY_OR_ZEROIZED: &[DeviceState] = &[DeviceState::Factory, DeviceState::Zeroized];
+const PROVISIONED_ONLY: &[DeviceState] = &[DeviceState::Provisioned];
 const OPERATIONAL_ONLY: &[DeviceState] = &[DeviceState::Operational];
+const LOCKED_ONLY: &[DeviceState] = &[DeviceState::Locked];
+const RECOVERY_ONLY: &[DeviceState] = &[DeviceState::Recovery];
+const ZEROIZE_ALLOWED: &[DeviceState] = &[
+    DeviceState::Provisioned,
+    DeviceState::Operational,
+    DeviceState::Recovery,
+];
+const CATALOG_STATES: &[DeviceState] = ALL_STATES;
 
 pub const GET_PROTOCOL_VERSION: CommandDefinition = CommandDefinition {
     id: CommandId::GetProtocolVersion,
     family: CommandFamily::Discovery,
     min_payload_len: 0,
     max_payload_len: 0,
-    allowed_device_states: ANY_NON_FAILED,
-    required_session_state: SessionState::Unauthenticated,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Public,
     replay_policy: ReplayPolicy::Repeatable,
     idempotency_policy: IdempotencyPolicy::Idempotent,
     enabled: true,
+    developer_only: false,
 };
 
 pub const GET_DEVICE_STATUS: CommandDefinition = CommandDefinition {
@@ -90,11 +111,12 @@ pub const GET_DEVICE_STATUS: CommandDefinition = CommandDefinition {
     family: CommandFamily::Status,
     min_payload_len: 1,
     max_payload_len: 1,
-    allowed_device_states: STATUS_STATES,
-    required_session_state: SessionState::Unauthenticated,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Public,
     replay_policy: ReplayPolicy::Repeatable,
     idempotency_policy: IdempotencyPolicy::Idempotent,
     enabled: true,
+    developer_only: false,
 };
 
 pub const GET_COMMAND_CATALOG: CommandDefinition = CommandDefinition {
@@ -102,44 +124,163 @@ pub const GET_COMMAND_CATALOG: CommandDefinition = CommandDefinition {
     family: CommandFamily::Discovery,
     min_payload_len: 1,
     max_payload_len: 1,
-    allowed_device_states: OPERATIONAL_ONLY,
-    required_session_state: SessionState::Unauthenticated,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Public,
     replay_policy: ReplayPolicy::Repeatable,
     idempotency_policy: IdempotencyPolicy::Idempotent,
     enabled: true,
+    developer_only: false,
 };
 
-pub const PROVISION_DEVICE: CommandDefinition = CommandDefinition {
-    id: CommandId::ProvisionDevice,
-    family: CommandFamily::Provisioning,
+pub const GET_LIFECYCLE_STATUS: CommandDefinition = CommandDefinition {
+    id: CommandId::GetLifecycleStatus,
+    family: CommandFamily::Status,
     min_payload_len: 0,
     max_payload_len: 0,
-    allowed_device_states: OPERATIONAL_ONLY,
-    required_session_state: SessionState::Administrator,
-    replay_policy: ReplayPolicy::SingleUse,
-    idempotency_policy: IdempotencyPolicy::NonIdempotent,
-    enabled: false,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Public,
+    replay_policy: ReplayPolicy::Repeatable,
+    idempotency_policy: IdempotencyPolicy::Idempotent,
+    enabled: true,
+    developer_only: false,
 };
 
-pub const FACTORY_RESET: CommandDefinition = CommandDefinition {
-    id: CommandId::FactoryReset,
-    family: CommandFamily::Administration,
-    min_payload_len: 0,
-    max_payload_len: 0,
-    allowed_device_states: OPERATIONAL_ONLY,
-    required_session_state: SessionState::Administrator,
+pub const BEGIN_PROVISIONING: CommandDefinition = CommandDefinition {
+    id: CommandId::BeginProvisioning,
+    family: CommandFamily::Lifecycle,
+    min_payload_len: 1,
+    max_payload_len: 16,
+    allowed_device_states: FACTORY_OR_ZEROIZED,
+    required_role: AuthorityRole::Bootstrap,
     replay_policy: ReplayPolicy::SingleUse,
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
-    enabled: false,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const FINALIZE_PROVISIONING: CommandDefinition = CommandDefinition {
+    id: CommandId::FinalizeProvisioning,
+    family: CommandFamily::Lifecycle,
+    min_payload_len: 5,
+    max_payload_len: 5,
+    allowed_device_states: PROVISIONED_ONLY,
+    required_role: AuthorityRole::Bootstrap,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const LOCK_DEVICE: CommandDefinition = CommandDefinition {
+    id: CommandId::LockDevice,
+    family: CommandFamily::Lifecycle,
+    min_payload_len: 1,
+    max_payload_len: 1,
+    allowed_device_states: OPERATIONAL_ONLY,
+    required_role: AuthorityRole::Administrator,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const UNLOCK_DEVICE: CommandDefinition = CommandDefinition {
+    id: CommandId::UnlockDevice,
+    family: CommandFamily::Lifecycle,
+    min_payload_len: 1,
+    max_payload_len: 1,
+    allowed_device_states: LOCKED_ONLY,
+    required_role: AuthorityRole::Administrator,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const ENTER_RECOVERY: CommandDefinition = CommandDefinition {
+    id: CommandId::EnterRecovery,
+    family: CommandFamily::Lifecycle,
+    min_payload_len: 1,
+    max_payload_len: 1,
+    allowed_device_states: LOCKED_ONLY,
+    required_role: AuthorityRole::Recovery,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const RECOVER_TO_PROVISIONED: CommandDefinition = CommandDefinition {
+    id: CommandId::RecoverToProvisioned,
+    family: CommandFamily::Lifecycle,
+    min_payload_len: 1,
+    max_payload_len: 1,
+    allowed_device_states: RECOVERY_ONLY,
+    required_role: AuthorityRole::Recovery,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const REACTIVATE_RECOVERED_PROVISIONING: CommandDefinition = CommandDefinition {
+    id: CommandId::ReactivateRecoveredProvisioning,
+    family: CommandFamily::Lifecycle,
+    min_payload_len: 5,
+    max_payload_len: 5,
+    allowed_device_states: PROVISIONED_ONLY,
+    required_role: AuthorityRole::Recovery,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const EXECUTE_ZEROIZE: CommandDefinition = CommandDefinition {
+    id: CommandId::ExecuteZeroize,
+    family: CommandFamily::Lifecycle,
+    min_payload_len: 2,
+    max_payload_len: 2,
+    allowed_device_states: ZEROIZE_ALLOWED,
+    required_role: AuthorityRole::Administrator,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const DEVELOPER_RESET_LIFECYCLE: CommandDefinition = CommandDefinition {
+    id: CommandId::DeveloperResetLifecycle,
+    family: CommandFamily::Lifecycle,
+    min_payload_len: 3,
+    max_payload_len: 3,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Developer,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: true,
 };
 
 pub const PUBLIC_COMMANDS: &[CommandDefinition] = &[
     GET_PROTOCOL_VERSION,
     GET_DEVICE_STATUS,
     GET_COMMAND_CATALOG,
+    GET_LIFECYCLE_STATUS,
 ];
 
-pub const RESERVED_COMMANDS: &[CommandDefinition] = &[PROVISION_DEVICE, FACTORY_RESET];
+pub const RESTRICTED_COMMANDS: &[CommandDefinition] = &[
+    BEGIN_PROVISIONING,
+    FINALIZE_PROVISIONING,
+    LOCK_DEVICE,
+    UNLOCK_DEVICE,
+    ENTER_RECOVERY,
+    RECOVER_TO_PROVISIONED,
+    REACTIVATE_RECOVERED_PROVISIONING,
+    EXECUTE_ZEROIZE,
+];
+
+pub const DEVELOPER_COMMANDS: &[CommandDefinition] = &[DEVELOPER_RESET_LIFECYCLE];
 
 pub fn lookup_command(id: u8) -> Option<CommandDefinition> {
     CommandId::from_byte(id).map(definition_for)
@@ -151,8 +292,16 @@ pub fn definition_for(id: CommandId) -> CommandDefinition {
         CommandId::GetProtocolVersion => GET_PROTOCOL_VERSION,
         CommandId::GetDeviceStatus => GET_DEVICE_STATUS,
         CommandId::GetCommandCatalog => GET_COMMAND_CATALOG,
-        CommandId::ProvisionDevice => PROVISION_DEVICE,
-        CommandId::FactoryReset => FACTORY_RESET,
+        CommandId::GetLifecycleStatus => GET_LIFECYCLE_STATUS,
+        CommandId::BeginProvisioning => BEGIN_PROVISIONING,
+        CommandId::FinalizeProvisioning => FINALIZE_PROVISIONING,
+        CommandId::LockDevice => LOCK_DEVICE,
+        CommandId::UnlockDevice => UNLOCK_DEVICE,
+        CommandId::EnterRecovery => ENTER_RECOVERY,
+        CommandId::RecoverToProvisioned => RECOVER_TO_PROVISIONED,
+        CommandId::ReactivateRecoveredProvisioning => REACTIVATE_RECOVERED_PROVISIONING,
+        CommandId::ExecuteZeroize => EXECUTE_ZEROIZE,
+        CommandId::DeveloperResetLifecycle => DEVELOPER_RESET_LIFECYCLE,
     }
 }
 
@@ -162,15 +311,52 @@ pub fn get_public_catalog() -> &'static [CommandDefinition] {
 }
 
 #[must_use]
-pub fn get_visible_catalog(session_state: SessionState, include_restricted: bool) -> &'static [CommandDefinition] {
-    if include_restricted && session_state == SessionState::Administrator {
-        &[
-            GET_PROTOCOL_VERSION,
-            GET_DEVICE_STATUS,
-            GET_COMMAND_CATALOG,
-            PROVISION_DEVICE,
-            FACTORY_RESET,
-        ]
+pub fn get_visible_catalog(
+    session_state: SessionState,
+    include_restricted: bool,
+    developer_mode: bool,
+) -> &'static [CommandDefinition] {
+    if include_restricted
+        && matches!(
+            session_state,
+            SessionState::Bootstrap
+                | SessionState::Administrator
+                | SessionState::Recovery
+                | SessionState::Developer
+        )
+    {
+        if developer_mode && session_state == SessionState::Developer {
+            &[
+                GET_PROTOCOL_VERSION,
+                GET_DEVICE_STATUS,
+                GET_COMMAND_CATALOG,
+                GET_LIFECYCLE_STATUS,
+                BEGIN_PROVISIONING,
+                FINALIZE_PROVISIONING,
+                LOCK_DEVICE,
+                UNLOCK_DEVICE,
+                ENTER_RECOVERY,
+                RECOVER_TO_PROVISIONED,
+                REACTIVATE_RECOVERED_PROVISIONING,
+                EXECUTE_ZEROIZE,
+                DEVELOPER_RESET_LIFECYCLE,
+            ]
+        } else {
+            &[
+                GET_PROTOCOL_VERSION,
+                GET_DEVICE_STATUS,
+                GET_COMMAND_CATALOG,
+                GET_LIFECYCLE_STATUS,
+                BEGIN_PROVISIONING,
+                FINALIZE_PROVISIONING,
+                LOCK_DEVICE,
+                UNLOCK_DEVICE,
+                ENTER_RECOVERY,
+                RECOVER_TO_PROVISIONED,
+                REACTIVATE_RECOVERED_PROVISIONING,
+                EXECUTE_ZEROIZE,
+            ]
+        }
     } else {
         PUBLIC_COMMANDS
     }

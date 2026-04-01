@@ -46,7 +46,7 @@ fn get_command_catalog_returns_public_commands() {
     assert!(maybe_encoded.is_some());
     let response = engine.handle_bytes(&maybe_encoded.unwrap_or_default());
     assert_eq!(response.code, StatusCode::Success.as_u8());
-    assert_eq!(response.payload.as_slice(), &[3, 0x01, 0x02, 0x03]);
+    assert_eq!(response.payload.as_slice(), &[4, 0x01, 0x02, 0x03, 0x04]);
 }
 
 #[test]
@@ -89,5 +89,5 @@ fn restricted_catalog_entries_are_hidden_from_unauthenticated_clients() {
     assert!(maybe_encoded.is_some());
     let response = engine.handle_bytes(&maybe_encoded.unwrap_or_default());
     assert_eq!(response.code, StatusCode::Success.as_u8());
-    assert_eq!(response.payload.as_slice(), &[3, 0x01, 0x02, 0x03]);
+    assert_eq!(response.payload.as_slice(), &[4, 0x01, 0x02, 0x03, 0x04]);
 }

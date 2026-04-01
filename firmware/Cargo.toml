@@ -11,7 +11,7 @@ bench = false
 
 [features]
 default = []
-debug-console = []
+developer-mode = []
 
 [dependencies]
 critical-section = "1.2.0"

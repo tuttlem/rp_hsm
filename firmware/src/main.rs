@@ -17,7 +17,7 @@ use panic_halt as _;
 #[cfg(all(
     target_os = "none",
     any(target_arch = "riscv32", target_arch = "arm"),
-    feature = "debug-console"
+    feature = "developer-mode"
 ))]
 use protocol::protocol::{
     DeviceState, ProtocolEngine, SessionState, clear_transient_buffer,
@@ -27,13 +27,13 @@ use rp235x_hal as hal;
 #[cfg(all(
     target_os = "none",
     any(target_arch = "riscv32", target_arch = "arm"),
-    feature = "debug-console"
+    feature = "developer-mode"
 ))]
 use usb_device::{class_prelude::*, prelude::*};
 #[cfg(all(
     target_os = "none",
     any(target_arch = "riscv32", target_arch = "arm"),
-    feature = "debug-console"
+    feature = "developer-mode"
 ))]
 use usbd_serial::SerialPort;
 
@@ -52,13 +52,12 @@ const LED_OFF_TICKS: u64 = 900_000;
 #[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
 #[hal::entry]
 fn main() -> ! {
-    let mut pac = match hal::pac::Peripherals::take() {
-        Some(peripherals) => peripherals,
-        None => halt(),
+    let Some(mut pac) = hal::pac::Peripherals::take() else {
+        halt();
     };
     let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
 
-    let clocks = match hal::clocks::init_clocks_and_plls(
+    let Ok(clocks) = hal::clocks::init_clocks_and_plls(
         XTAL_FREQ_HZ,
         pac.XOSC,
         pac.CLOCKS,
@@ -66,9 +65,8 @@ fn main() -> ! {
         pac.PLL_USB,
         &mut pac.RESETS,
         &mut watchdog,
-    ) {
-        Ok(clocks) => clocks,
-        Err(_) => halt(),
+    ) else {
+        halt();
     };
 
     let timer = hal::Timer::new_timer0(pac.TIMER0, &mut pac.RESETS, &clocks);
@@ -83,7 +81,7 @@ fn main() -> ! {
 
     let mut led = pins.gpio25.into_push_pull_output();
 
-    #[cfg(feature = "debug-console")]
+    #[cfg(feature = "developer-mode")]
     let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
         pac.USB,
         pac.USB_DPRAM,
@@ -92,43 +90,44 @@ fn main() -> ! {
         &mut pac.RESETS,
     ));
 
-    #[cfg(feature = "debug-console")]
+    #[cfg(feature = "developer-mode")]
     let mut serial = SerialPort::new(&usb_bus);
 
-    #[cfg(feature = "debug-console")]
+    #[cfg(feature = "developer-mode")]
     let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x1209, 0x0001))
         .strings(&[StringDescriptors::default()
             .manufacturer("Tuttle Labs")
-            .product("RP2350 HSM")
-            .serial_number("TEST")])
+            .product("RP2350 HSM Developer Mode")
+            .serial_number("DEV")])
         .unwrap_or_else(|_| halt())
         .max_packet_size_0(64)
         .unwrap_or_else(|_| halt())
         .device_class(usbd_serial::USB_CLASS_CDC)
         .build();
 
-    #[cfg(feature = "debug-console")]
+    #[cfg(feature = "developer-mode")]
     let mut buf = [0u8; 64];
-    #[cfg(feature = "debug-console")]
-    let mut protocol_engine =
-        ProtocolEngine::new(DeviceState::Operational, SessionState::Unauthenticated);
+    #[cfg(feature = "developer-mode")]
+    let mut protocol_engine = ProtocolEngine::new(DeviceState::Factory, SessionState::Developer);
+    #[cfg(feature = "developer-mode")]
+    protocol_engine.set_developer_mode(true);
     let mut led_is_on = false;
     let mut next_toggle_at = timer.get_counter().ticks();
-    #[cfg(feature = "debug-console")]
+    #[cfg(feature = "developer-mode")]
     let mut host_connected = false;
 
-    #[cfg(feature = "debug-console")]
+    #[cfg(feature = "developer-mode")]
     logln!("boot");
-    #[cfg(feature = "debug-console")]
-    logln!("rp_hsm starting");
+    #[cfg(feature = "developer-mode")]
+    logln!("rp_hsm developer-mode starting");
 
     loop {
-        #[cfg(feature = "debug-console")]
+        #[cfg(feature = "developer-mode")]
         if usb_dev.poll(&mut [&mut serial]) {
             let dtr = serial.dtr();
             if dtr && !host_connected {
                 host_connected = true;
-                logln!("console connected");
+                logln!("developer console connected");
             } else if !dtr && host_connected {
                 host_connected = false;
             }
@@ -145,12 +144,12 @@ fn main() -> ! {
             }
         }
 
-        #[cfg(feature = "debug-console")]
+        #[cfg(feature = "developer-mode")]
         if host_connected {
             logging::flush(&mut serial);
         }
 
-        #[cfg(not(feature = "debug-console"))]
+        #[cfg(not(feature = "developer-mode"))]
         logging::flush();
 
         let now = timer.get_counter().ticks();
@@ -159,12 +158,12 @@ fn main() -> ! {
 
             if led_is_on {
                 led.set_high().ok();
-                #[cfg(feature = "debug-console")]
+                #[cfg(feature = "developer-mode")]
                 logln!("heartbeat: on");
                 next_toggle_at = now + LED_ON_TICKS;
             } else {
                 led.set_low().ok();
-                #[cfg(feature = "debug-console")]
+                #[cfg(feature = "developer-mode")]
                 logln!("heartbeat: off");
                 next_toggle_at = now + LED_OFF_TICKS;
             }

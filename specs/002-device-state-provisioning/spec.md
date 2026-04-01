@@ -3,7 +3,7 @@
 **Feature Branch**: `002-device-state-provisioning`  
 **Created**: 2026-04-01  
 **Status**: Draft  
-**Input**: User description: "Define the RP2350 HSM device state machine, provisioning workflow, ownership bootstrap, lock, unlock, recovery, and zeroize flows"
+**Input**: User description: "Define the RP2350 HSM device state machine, provisioning workflow, ownership bootstrap, lock, unlock, recovery, zeroize flows, and a developer-only bad-state reset path"
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -73,9 +73,17 @@ ownership and secret-destruction outcomes.
 1. **Given** a device requires recovery, **When** an authorized recovery
    workflow is completed, **Then** the device enters the documented recovery
    state without restoring unauthorized operational access.
-2. **Given** a zeroize request is approved, **When** the device performs the
+2. **Given** a device exits recovery into a reactivation-ready state,
+   **When** the explicit recovery reactivation workflow is completed,
+   **Then** the device returns to operational state only through that dedicated
+   command path.
+3. **Given** a zeroize request is approved, **When** the device performs the
    destructive action, **Then** the device removes protected ownership and
    secret-bearing state and ends in a documented post-zeroize state.
+4. **Given** a development image is running in developer mode, **When** an
+   authorized developer reset is requested, **Then** the device clears
+   lifecycle state, ownership state, and pending transitions and returns to the
+   documented reset target without exposing that path in production images.
 
 ### Edge Cases
 
@@ -87,6 +95,10 @@ ownership and secret-destruction outcomes.
   device.
 - Ownership transfer is attempted while the device is in a non-transferable
   state.
+- Recovery exit is completed but the explicit reactivation command is never
+  issued.
+- A developer reset is attempted on a production image or through a non-developer
+  command path.
 
 ### Security Misuse Cases *(mandatory)*
 
@@ -96,6 +108,8 @@ ownership and secret-destruction outcomes.
   a previously valid host path.
 - An attacker attempts to abuse recovery or zeroize operations to gain
   ownership, destroy auditability, or erase evidence of misuse.
+- An attacker attempts to use developer-only reset functionality in a
+  production build or through the normal operational command catalog.
 
 ## Requirements *(mandatory)*
 
@@ -112,6 +126,10 @@ ownership and secret-destruction outcomes.
   the device in a safe non-operational state.
 - **FR-005**: The system MUST define lock, unlock, ownership transfer, recovery,
   and zeroize workflows with explicit entry conditions and outcomes.
+- **FR-005a**: The system MUST define a dedicated recovery reactivation
+  workflow for returning a recovered device from a reactivation-ready state to
+  operational state, rather than implicitly reusing initial provisioning entry
+  commands.
 - **FR-006**: The system MUST define fail-safe behavior for invalid state,
   interrupted transitions, rejected ownership actions, and persistence failures.
 - **FR-007**: The system MUST define how ownership records, recovery context,
@@ -121,6 +139,13 @@ ownership and secret-destruction outcomes.
   the device is in an allowed state for those commands.
 - **FR-009**: The system MUST define the post-zeroize state clearly so that
   ownership, secrets, and permissions are not left ambiguous.
+- **FR-010**: The system MUST define a developer-only lifecycle reset workflow
+  that is compiled out of production images and can return a lab device from an
+  unrecoverable development state to a documented non-owned reset target.
+- **FR-011**: The system MUST treat developer transport, developer reset, and
+  any other development-time lifecycle shortcuts as one explicit
+  non-production build mode rather than independent partially overlapping
+  feature flags.
 
 ### Security Requirements *(mandatory)*
 
@@ -129,9 +154,14 @@ ownership and secret-destruction outcomes.
   reviewable ownership establishment.
 - **SR-002**: The feature MUST ensure that recovery, unlock, and transfer
   workflows cannot silently grant broader privileges than documented.
+- **SR-002a**: The feature MUST ensure that recovery exit and post-recovery
+  reactivation remain distinct steps so that recovery cannot silently restore
+  operational privileges.
 - **SR-003**: The feature MUST prevent state reporting or administrative
   feedback from exposing secret material or sensitive recovery data beyond what
   is required for safe operation.
+- **SR-004**: The feature MUST ensure developer-only reset capability cannot be
+  reached, enumerated, or enabled in production images.
 
 ### Key Entities *(include if feature involves data)*
 
@@ -144,6 +174,9 @@ ownership and secret-destruction outcomes.
 - **Zeroize Event**: A destructive administrative action that removes protected
   ownership and secret-bearing state and places the device into a defined safe
   state.
+- **Developer Reset Event**: A development-only destructive administrative
+  action that clears lifecycle state, ownership state, and pending transitions
+  and returns the device to a defined lab reset target.
 
 ## Success Criteria *(mandatory)*
 
@@ -157,6 +190,9 @@ ownership and secret-destruction outcomes.
   state through a documented workflow without ad hoc operator decisions.
 - **SC-004**: Recovery and zeroize procedures produce consistent end states that
   can be verified by operators and reviewers after each invocation.
+- **SC-005**: 100% of developer-reset capability is absent from production
+  command catalogs and production builds while remaining verifiably available in
+  developer-mode builds.
 
 ## Assumptions
 
@@ -168,11 +204,15 @@ ownership and secret-destruction outcomes.
   not to provide forensic retention.
 - Recovery is a controlled administrative path, not a convenience shortcut back
   to normal operations.
+- Developer reset is for laboratory and bring-up use only and will target a
+  defined non-owned state rather than a privileged shortcut into operation.
 
 ## Security Acceptance Notes
 
 - Acceptance testing must prove denied transitions as thoroughly as successful
 - ones.
+- Acceptance testing must prove developer-reset commands are unreachable in
+  production images and explicitly reachable in developer-mode images only.
 - Any claim that state integrity survives power interruption must identify
   whether it depends on persistence guarantees outside this feature alone.
 - The specification must not imply physical tamper evidence or secure custody

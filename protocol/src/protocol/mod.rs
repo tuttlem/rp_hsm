@@ -6,8 +6,7 @@ pub mod state;
 
 pub use codec::{DecodeError, StatusCode, decode_frame, encode_frame};
 pub use command::{
-    CommandDefinition, CommandFamily, CommandId, IdempotencyPolicy, ReplayPolicy,
-    get_public_catalog,
+    CommandDefinition, CommandFamily, CommandId, IdempotencyPolicy, ReplayPolicy, get_public_catalog,
 };
 pub use frame::{
     FLAG_INCLUDE_RESTRICTED, FLAG_REPLAY_SENSITIVE, FLAG_RESPONSE_REQUIRED, HEADER_LEN,
@@ -15,4 +14,11 @@ pub use frame::{
     RESERVED_FLAG_MASK,
 };
 pub use parser::{ProtocolEngine, clear_transient_buffer};
-pub use state::{DeviceState, SessionState, SessionTracker};
+pub use state::{
+    AuthorityRole, DEVELOPER_RESET_COMPLETION_FLAGS, DeveloperResetOutcome, DeviceState,
+    LifecycleStatus, LockResult, ProvisioningRecord, RECORD_VERSION, RecoveryPolicy,
+    RecoveryResult, SessionState, SessionTracker, StateRevision, TransitionIntent,
+    TransitionResult, TransitionType, ZEROIZE_COMPLETION_FLAGS, ZeroizeOutcome,
+    developer_mode_session, developer_reset_marker, finalize_marker, recovery_marker,
+    reactivate_marker, unlock_marker, zeroize_marker,
+};

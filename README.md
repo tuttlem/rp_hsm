@@ -22,17 +22,17 @@ Build the firmware crate for the RP2350 RISC-V target:
 cargo build -p firmware --target riscv32imac-unknown-none-elf
 ```
 
-Build firmware with the USB debug console enabled:
+Build firmware with `developer-mode` enabled:
 
 ```bash
-cargo build -p firmware --target riscv32imac-unknown-none-elf --features debug-console
+cargo build -p firmware --target riscv32imac-unknown-none-elf --features developer-mode
 ```
 
 Alias form:
 
 ```bash
 cargo firmware-build
-cargo firmware-build --features debug-console
+cargo firmware-build --features developer-mode
 ```
 
 `cargo build` and `cargo firmware-build` only compile artifacts. They do not flash the device.
@@ -45,32 +45,34 @@ Build and flash firmware using the configured `picotool` runner:
 cargo run -p firmware --target riscv32imac-unknown-none-elf
 ```
 
-Build and flash firmware with the USB debug console enabled:
+Build and flash firmware with `developer-mode` enabled:
 
 ```bash
-cargo run -p firmware --target riscv32imac-unknown-none-elf --features debug-console
+cargo run -p firmware --target riscv32imac-unknown-none-elf --features developer-mode
 ```
 
 Alias form:
 
 ```bash
 cargo firmware-run
-cargo firmware-run-debug
+cargo firmware-run-developer
 ```
 
 Important:
 
-- `cargo firmware-run` flashes the default firmware image without the USB debug console.
-- `cargo firmware-run-debug` flashes the firmware image with `--features debug-console`.
-- The USB CDC device is only present when the flashed image includes `--features debug-console`.
-- Building a debug-console image and then flashing the default image will remove `/dev/ttyACM*` again.
+- `cargo firmware-run` flashes the default firmware image without `developer-mode`.
+- `cargo firmware-run-developer` flashes the firmware image with `--features developer-mode`.
+- The USB CDC device and developer-only lifecycle reset path are only present when the flashed image includes `--features developer-mode`.
+- Building a `developer-mode` image and then flashing the default image will remove `/dev/ttyACM*` again.
 
-Recommended USB console workflow:
+Recommended developer workflow:
 
 ```bash
-cargo firmware-run-debug
+cargo firmware-run-developer
 ls /dev/ttyACM*
 ```
+
+`developer-mode` is a non-production feature bundle. It enables the USB CDC transport, developer probe access, and the developer-only lifecycle reset command used to recover lab devices from bad state.
 
 ### Run the host probe
 
@@ -98,6 +100,15 @@ Show probe help:
 ```bash
 cargo probe -- --help
 ```
+
+The probe expects a `developer-mode` firmware image and validates:
+
+1. protocol version and device status
+2. public and restricted command catalogs
+3. provisioning from `factory` to `operational`
+4. lock, unlock, and recovery transitions
+5. zeroize behavior
+6. developer-only lifecycle reset back to `factory`
 
 If the probe fails with `Permission denied`, check the device node ownership first:
 
@@ -160,7 +171,7 @@ Defined in [.cargo/config.toml](/home/michael/src/embedded/rp_hsm/.cargo/config.
 
 - `cargo firmware-build`
 - `cargo firmware-run`
-- `cargo firmware-run-debug`
+- `cargo firmware-run-developer`
 - `cargo probe -- ...`
 
 ## Maintenance Rule

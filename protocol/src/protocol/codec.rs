@@ -4,6 +4,10 @@ use super::frame::{
     HEADER_LEN, MAX_FRAME_LEN, MAX_PAYLOAD_LEN, MessageKind, PROTOCOL_VERSION, ProtocolFrame,
     RESERVED_FLAG_MASK,
 };
+use super::state::{
+    DeveloperResetOutcome, DeviceState, LifecycleStatus, LockResult, RecoveryResult, SessionState,
+    StateRevision, TransitionResult, ZeroizeOutcome,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -108,4 +112,95 @@ pub fn clear_bytes(bytes: &mut [u8]) {
 #[must_use]
 pub fn protocol_version_response() -> ProtocolFrame {
     status_response(StatusCode::Success, &[PROTOCOL_VERSION])
+}
+
+#[must_use]
+pub fn encode_device_status_payload(
+    device_state: DeviceState,
+    session_state: SessionState,
+) -> [u8; 2] {
+    [device_state as u8, session_state as u8]
+}
+
+#[must_use]
+pub fn encode_lifecycle_status_payload(status: LifecycleStatus) -> [u8; 4] {
+    [
+        status.state as u8,
+        u8::from(status.owner_present),
+        u8::from(status.recovery_required),
+        u8::from(status.pending_transition_present),
+    ]
+}
+
+#[must_use]
+pub fn encode_transition_result_payload(result: TransitionResult) -> [u8; 9] {
+    let transition_id = result.transition_id.to_le_bytes();
+    let revision = result.revision_counter.to_le_bytes();
+    [
+        result.state as u8,
+        transition_id[0],
+        transition_id[1],
+        transition_id[2],
+        transition_id[3],
+        revision[0],
+        revision[1],
+        revision[2],
+        revision[3],
+    ]
+}
+
+#[must_use]
+pub fn encode_state_revision_payload(result: StateRevision) -> [u8; 5] {
+    let revision = result.revision_counter.to_le_bytes();
+    [
+        result.state as u8,
+        revision[0],
+        revision[1],
+        revision[2],
+        revision[3],
+    ]
+}
+
+#[must_use]
+pub fn encode_lock_result_payload(result: LockResult) -> [u8; 2] {
+    [result.state as u8, result.reason_code]
+}
+
+#[must_use]
+pub fn encode_recovery_result_payload(result: RecoveryResult) -> [u8; 2] {
+    [result.state as u8, u8::from(result.recovery_required)]
+}
+
+#[must_use]
+pub fn encode_zeroize_payload(result: ZeroizeOutcome) -> [u8; 5] {
+    [
+        result.result_state as u8,
+        u8::from(result.owner_binding_cleared),
+        u8::from(result.secret_storage_cleared),
+        u8::from(result.transient_buffers_cleared),
+        u8::from(result.requires_reprovisioning),
+    ]
+}
+
+#[must_use]
+pub fn encode_developer_reset_payload(result: DeveloperResetOutcome) -> [u8; 4] {
+    [
+        result.result_state as u8,
+        u8::from(result.owner_binding_cleared),
+        u8::from(result.pending_transition_cleared),
+        u8::from(result.transient_buffers_cleared),
+    ]
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the payload does not contain a
+/// 4-byte transition identifier followed by the required marker.
+pub fn decode_transition_request(payload: &[u8], marker: u8) -> Result<u32, StatusCode> {
+    if payload.len() != 5 || payload[4] != marker {
+        return Err(StatusCode::ValidationError);
+    }
+    Ok(u32::from_le_bytes([
+        payload[0], payload[1], payload[2], payload[3],
+    ]))
 }
