@@ -1,0 +1,10 @@
+[package]
+name = "rp_hsm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+heapless = "0.8.0"
+
+[lints]
+workspace = true
