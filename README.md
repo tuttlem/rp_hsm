@@ -1,0 +1,175 @@
+# RP2350 HSM Workspace
+
+This repository is a Cargo workspace with three crates:
+
+- `firmware`: the embedded RP2350 firmware image
+- `protocol`: shared protocol and wire-format library
+- `host_tools`: desktop utilities for probing and testing the device
+
+Keep this file aligned with:
+
+- [.cargo/config.toml](/home/michael/src/embedded/rp_hsm/.cargo/config.toml)
+- new workspace binaries under [host_tools/src/bin](/home/michael/src/embedded/rp_hsm/host_tools/src/bin)
+- any new firmware features that change the required invocation flags
+
+## Common Commands
+
+### Build firmware
+
+Build the firmware crate for the RP2350 RISC-V target:
+
+```bash
+cargo build -p firmware --target riscv32imac-unknown-none-elf
+```
+
+Build firmware with the USB debug console enabled:
+
+```bash
+cargo build -p firmware --target riscv32imac-unknown-none-elf --features debug-console
+```
+
+Alias form:
+
+```bash
+cargo firmware-build
+cargo firmware-build --features debug-console
+```
+
+`cargo build` and `cargo firmware-build` only compile artifacts. They do not flash the device.
+
+### Flash firmware
+
+Build and flash firmware using the configured `picotool` runner:
+
+```bash
+cargo run -p firmware --target riscv32imac-unknown-none-elf
+```
+
+Build and flash firmware with the USB debug console enabled:
+
+```bash
+cargo run -p firmware --target riscv32imac-unknown-none-elf --features debug-console
+```
+
+Alias form:
+
+```bash
+cargo firmware-run
+cargo firmware-run-debug
+```
+
+Important:
+
+- `cargo firmware-run` flashes the default firmware image without the USB debug console.
+- `cargo firmware-run-debug` flashes the firmware image with `--features debug-console`.
+- The USB CDC device is only present when the flashed image includes `--features debug-console`.
+- Building a debug-console image and then flashing the default image will remove `/dev/ttyACM*` again.
+
+Recommended USB console workflow:
+
+```bash
+cargo firmware-run-debug
+ls /dev/ttyACM*
+```
+
+### Run the host probe
+
+Run the Rust protocol probe against the default serial device:
+
+```bash
+cargo run -p host_tools --bin probe_protocol -- --port /dev/ttyACM0
+```
+
+Use a specific baud rate:
+
+```bash
+cargo run -p host_tools --bin probe_protocol -- --port /dev/ttyACM0 --baud 115200
+```
+
+Alias form:
+
+```bash
+cargo probe -- --port /dev/ttyACM0
+cargo probe -- --port /dev/ttyACM0 --baud 115200
+```
+
+Show probe help:
+
+```bash
+cargo probe -- --help
+```
+
+If the probe fails with `Permission denied`, check the device node ownership first:
+
+```bash
+ls -l /dev/ttyACM0
+```
+
+Do not assume the serial access group is always `dialout`. On some systems it may be `uucp` or another group. Add your user to whatever group owns the device node, then log out and back in before retrying:
+
+```bash
+id
+groups
+```
+
+Example:
+
+```bash
+sudo usermod -aG uucp $USER
+```
+
+If your system shows a different group on `/dev/ttyACM0`, use that group instead.
+
+### Test the protocol crate
+
+Run protocol tests on the host target:
+
+```bash
+cargo test -p rp_hsm --target x86_64-unknown-linux-gnu
+```
+
+Run protocol linting on the host target:
+
+```bash
+cargo clippy -p rp_hsm --target x86_64-unknown-linux-gnu --tests -- -W clippy::pedantic
+```
+
+### Build individual crates
+
+Build the shared protocol crate:
+
+```bash
+cargo build -p rp_hsm
+```
+
+Build the host tools crate:
+
+```bash
+cargo build -p host_tools
+```
+
+### Inspect available probe arguments
+
+```bash
+cargo run -p host_tools --bin probe_protocol -- --help
+```
+
+## Current Cargo Aliases
+
+Defined in [.cargo/config.toml](/home/michael/src/embedded/rp_hsm/.cargo/config.toml):
+
+- `cargo firmware-build`
+- `cargo firmware-run`
+- `cargo firmware-run-debug`
+- `cargo probe -- ...`
+
+## Maintenance Rule
+
+When adding or changing:
+
+- Cargo aliases
+- host-side binaries
+- firmware run modes
+- required feature flags
+
+update this README in the same change.

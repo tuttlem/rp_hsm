@@ -1,25 +1,55 @@
-#![no_std]
-#![no_main]
+#![cfg_attr(
+    all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")),
+    no_std
+)]
+#![cfg_attr(
+    all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")),
+    no_main
+)]
 
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
 mod logging;
 
-use panic_halt as _;
-use rp235x_hal as hal;
-
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
 use embedded_hal::digital::OutputPin;
-#[cfg(feature = "debug-console")]
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+use panic_halt as _;
+#[cfg(all(
+    target_os = "none",
+    any(target_arch = "riscv32", target_arch = "arm"),
+    feature = "debug-console"
+))]
+use protocol::protocol::{
+    DeviceState, ProtocolEngine, SessionState, clear_transient_buffer,
+};
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+use rp235x_hal as hal;
+#[cfg(all(
+    target_os = "none",
+    any(target_arch = "riscv32", target_arch = "arm"),
+    feature = "debug-console"
+))]
 use usb_device::{class_prelude::*, prelude::*};
-#[cfg(feature = "debug-console")]
+#[cfg(all(
+    target_os = "none",
+    any(target_arch = "riscv32", target_arch = "arm"),
+    feature = "debug-console"
+))]
 use usbd_serial::SerialPort;
 
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
 #[unsafe(link_section = ".start_block")]
 #[used]
 pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
 
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
 const XTAL_FREQ_HZ: u32 = 12_000_000u32;
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
 const LED_ON_TICKS: u64 = 100_000;
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
 const LED_OFF_TICKS: u64 = 900_000;
 
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
 #[hal::entry]
 fn main() -> ! {
     let mut pac = match hal::pac::Peripherals::take() {
@@ -79,6 +109,9 @@ fn main() -> ! {
 
     #[cfg(feature = "debug-console")]
     let mut buf = [0u8; 64];
+    #[cfg(feature = "debug-console")]
+    let mut protocol_engine =
+        ProtocolEngine::new(DeviceState::Operational, SessionState::Unauthenticated);
     let mut led_is_on = false;
     let mut next_toggle_at = timer.get_counter().ticks();
     #[cfg(feature = "debug-console")]
@@ -104,10 +137,11 @@ fn main() -> ! {
                 && let Ok(count) = serial.read(&mut buf)
                 && count > 0
             {
-                // Consume debug input without interpreting or echoing it in release firmware.
-                for byte in &mut buf[..count] {
-                    *byte = 0;
+                let response = protocol_engine.handle_bytes(&buf[..count]);
+                if let Some(encoded) = protocol::protocol::encode_frame(&response) {
+                    let _ = serial.write(&encoded);
                 }
+                clear_transient_buffer(&mut buf[..count]);
             }
         }
 
@@ -138,8 +172,12 @@ fn main() -> ! {
     }
 }
 
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
 fn halt() -> ! {
     loop {
         core::hint::spin_loop();
     }
 }
+
+#[cfg(not(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm"))))]
+fn main() {}

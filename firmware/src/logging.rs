@@ -1,7 +1,11 @@
+#[cfg(feature = "debug-console")]
 use core::cell::RefCell;
+#[cfg(feature = "debug-console")]
 use core::fmt::{self, Write};
 
+#[cfg(feature = "debug-console")]
 use critical_section::Mutex;
+#[cfg(feature = "debug-console")]
 use heapless::Deque;
 #[cfg(feature = "debug-console")]
 use usb_device::bus::UsbBus;
@@ -28,13 +32,17 @@ macro_rules! logln {
     };
 }
 
+#[cfg(feature = "debug-console")]
 const LOG_BUFFER_SIZE: usize = 1024;
 
+#[cfg(feature = "debug-console")]
 static LOG_BUFFER: Mutex<RefCell<Deque<u8, LOG_BUFFER_SIZE>>> =
     Mutex::new(RefCell::new(Deque::new()));
 
+#[cfg(feature = "debug-console")]
 pub struct Logger;
 
+#[cfg(feature = "debug-console")]
 impl Write for Logger {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         critical_section::with(|cs| {
@@ -47,10 +55,15 @@ impl Write for Logger {
     }
 }
 
+#[cfg(feature = "debug-console")]
 pub fn print_args(args: fmt::Arguments<'_>) {
     let mut logger = Logger;
     let _ = logger.write_fmt(args);
 }
+
+#[cfg(not(feature = "debug-console"))]
+#[allow(dead_code)]
+pub fn print_args(_: core::fmt::Arguments<'_>) {}
 
 #[cfg(feature = "debug-console")]
 pub fn flush<B: UsbBus>(serial: &mut SerialPort<'_, B>) {
