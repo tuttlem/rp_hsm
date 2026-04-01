@@ -1,26 +1,14 @@
-[package]
-name = "rp_hsm"
+[workspace]
+members = [
+    "firmware",
+    "host_tools",
+    "protocol",
+]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-
-[features]
-default = []
-debug-console = []
-
-[dependencies]
-embedded-hal = "1.0.0"
-heapless = "0.8.0"
-usb-device = "0.3.2"
-usbd-serial = "0.2.2"
-rp235x-hal = { git = "https://github.com/rp-rs/rp-hal", version = "0.4.0", features = [
-    "binary-info",
-    "critical-section-impl",
-    "rt",
-    "defmt",
-] }
-panic-halt = "1.0.0"
-rp-binary-info = "0.1.0"
-critical-section = "1.2.0"
 
 [profile.dev]
 panic = "abort"
@@ -33,11 +21,11 @@ lto = "fat"
 overflow-checks = true
 strip = "symbols"
 
-[lints.rust]
+[workspace.lints.rust]
 rust_2018_idioms = "deny"
 unused_must_use = "deny"
 
-[lints.clippy]
+[workspace.lints.clippy]
 dbg_macro = "deny"
 expect_used = "deny"
 panic = "deny"

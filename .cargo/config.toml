@@ -1,5 +1,8 @@
-[build]
-target = "riscv32imac-unknown-none-elf"
+[alias]
+firmware-build = "build -p firmware --target riscv32imac-unknown-none-elf"
+firmware-run = "run -p firmware --target riscv32imac-unknown-none-elf"
+firmware-run-developer = "run -p firmware --target riscv32imac-unknown-none-elf --features developer-mode"
+probe = "run -p host_tools --bin probe_protocol"
 
 [target.riscv32imac-unknown-none-elf]
 rustflags = [
