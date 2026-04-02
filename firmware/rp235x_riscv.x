@@ -4,7 +4,8 @@ MEMORY {
      *
      * 2 MiB is a safe default here, although a Pico 2 has 4 MiB.
      */
-    FLASH : ORIGIN = 0x10000000, LENGTH = 2048K
+    FLASH : ORIGIN = 0x10000000, LENGTH = 2040K
+    PERSIST : ORIGIN = 0x101FE000, LENGTH = 8K
     /*
      * RAM consists of 8 banks, SRAM0-SRAM7, with a striped mapping.
      * This is usually good for performance, as it distributes load on
@@ -43,6 +44,8 @@ MEMORY {
 
 PROVIDE(_stext = ORIGIN(FLASH));
 PROVIDE(_stack_start = ORIGIN(RAM) + LENGTH(RAM));
+PROVIDE(__persistent_store_start = ORIGIN(PERSIST));
+PROVIDE(__persistent_store_end = ORIGIN(PERSIST) + LENGTH(PERSIST));
 PROVIDE(_max_hart_id = 0);
 PROVIDE(_hart_stack_size = 2K);
 PROVIDE(_heap_size = 0);

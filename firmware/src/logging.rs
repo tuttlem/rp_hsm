@@ -1,11 +1,15 @@
+#[cfg(feature = "developer-mode")]
 use core::cell::RefCell;
+#[cfg(feature = "developer-mode")]
 use core::fmt::{self, Write};
 
+#[cfg(feature = "developer-mode")]
 use critical_section::Mutex;
+#[cfg(feature = "developer-mode")]
 use heapless::Deque;
-#[cfg(feature = "debug-console")]
+#[cfg(feature = "developer-mode")]
 use usb_device::bus::UsbBus;
-#[cfg(feature = "debug-console")]
+#[cfg(feature = "developer-mode")]
 use usbd_serial::SerialPort;
 
 #[macro_export]
@@ -28,13 +32,17 @@ macro_rules! logln {
     };
 }
 
+#[cfg(feature = "developer-mode")]
 const LOG_BUFFER_SIZE: usize = 1024;
 
+#[cfg(feature = "developer-mode")]
 static LOG_BUFFER: Mutex<RefCell<Deque<u8, LOG_BUFFER_SIZE>>> =
     Mutex::new(RefCell::new(Deque::new()));
 
+#[cfg(feature = "developer-mode")]
 pub struct Logger;
 
+#[cfg(feature = "developer-mode")]
 impl Write for Logger {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         critical_section::with(|cs| {
@@ -47,12 +55,17 @@ impl Write for Logger {
     }
 }
 
+#[cfg(feature = "developer-mode")]
 pub fn print_args(args: fmt::Arguments<'_>) {
     let mut logger = Logger;
     let _ = logger.write_fmt(args);
 }
 
-#[cfg(feature = "debug-console")]
+#[cfg(not(feature = "developer-mode"))]
+#[allow(dead_code)]
+pub fn print_args(_: core::fmt::Arguments<'_>) {}
+
+#[cfg(feature = "developer-mode")]
 pub fn flush<B: UsbBus>(serial: &mut SerialPort<'_, B>) {
     let mut chunk = [0u8; 64];
     let mut count = 0usize;
@@ -95,5 +108,5 @@ pub fn flush<B: UsbBus>(serial: &mut SerialPort<'_, B>) {
     }
 }
 
-#[cfg(not(feature = "debug-console"))]
+#[cfg(not(feature = "developer-mode"))]
 pub fn flush() {}

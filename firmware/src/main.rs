@@ -1,0 +1,245 @@
+#![cfg_attr(
+    all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")),
+    no_std
+)]
+#![cfg_attr(
+    all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")),
+    no_main
+)]
+
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+mod logging;
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+mod persistence;
+
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+use embedded_hal::digital::OutputPin;
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+use panic_halt as _;
+#[cfg(all(
+    target_os = "none",
+    any(target_arch = "riscv32", target_arch = "arm"),
+    feature = "developer-mode"
+))]
+use protocol::protocol::{
+    DeviceState, FirmwareAction, ProtocolEngine, SessionState, StatusCode,
+    clear_transient_buffer, status_response,
+};
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+use rp235x_hal as hal;
+#[cfg(all(
+    target_os = "none",
+    any(target_arch = "riscv32", target_arch = "arm"),
+    feature = "developer-mode"
+))]
+use usb_device::{class_prelude::*, prelude::*};
+#[cfg(all(
+    target_os = "none",
+    any(target_arch = "riscv32", target_arch = "arm"),
+    feature = "developer-mode"
+))]
+use usbd_serial::SerialPort;
+
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+#[unsafe(link_section = ".start_block")]
+#[used]
+pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
+
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+const XTAL_FREQ_HZ: u32 = 12_000_000u32;
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+const LED_ON_TICKS: u64 = 100_000;
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+const LED_OFF_TICKS: u64 = 900_000;
+
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+#[hal::entry]
+fn main() -> ! {
+    let Some(mut pac) = hal::pac::Peripherals::take() else {
+        halt();
+    };
+    let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
+
+    let Ok(clocks) = hal::clocks::init_clocks_and_plls(
+        XTAL_FREQ_HZ,
+        pac.XOSC,
+        pac.CLOCKS,
+        pac.PLL_SYS,
+        pac.PLL_USB,
+        &mut pac.RESETS,
+        &mut watchdog,
+    ) else {
+        halt();
+    };
+
+    let timer = hal::Timer::new_timer0(pac.TIMER0, &mut pac.RESETS, &clocks);
+    let sio = hal::Sio::new(pac.SIO);
+
+    let pins = hal::gpio::Pins::new(
+        pac.IO_BANK0,
+        pac.PADS_BANK0,
+        sio.gpio_bank0,
+        &mut pac.RESETS,
+    );
+
+    let mut led = pins.gpio25.into_push_pull_output();
+
+    #[cfg(feature = "developer-mode")]
+    let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
+        pac.USB,
+        pac.USB_DPRAM,
+        clocks.usb_clock,
+        true,
+        &mut pac.RESETS,
+    ));
+
+    #[cfg(feature = "developer-mode")]
+    let mut serial = SerialPort::new(&usb_bus);
+
+    #[cfg(feature = "developer-mode")]
+    let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x1209, 0x0001))
+        .strings(&[StringDescriptors::default()
+            .manufacturer("Tuttle Labs")
+            .product("RP2350 HSM Developer Mode")
+            .serial_number("DEV")])
+        .unwrap_or_else(|_| halt())
+        .max_packet_size_0(64)
+        .unwrap_or_else(|_| halt())
+        .device_class(usbd_serial::USB_CLASS_CDC)
+        .build();
+
+    #[cfg(feature = "developer-mode")]
+    let mut buf = [0u8; 64];
+    #[cfg(feature = "developer-mode")]
+    let mut protocol_engine = ProtocolEngine::new(DeviceState::Factory, SessionState::Developer);
+    #[cfg(feature = "developer-mode")]
+    protocol_engine.set_developer_mode(true);
+    #[cfg(feature = "developer-mode")]
+    #[cfg(feature = "developer-mode")]
+    match persistence::FlashStateStore::load() {
+        Ok(persistence::LoadOutcome::Restored(state)) => {
+            protocol_engine.restore_provisioning_snapshot(state.provisioning);
+            protocol_engine.restore_key_store(state.key_store);
+            protocol_engine.restore_auth_snapshot(state.auth);
+        }
+        Ok(persistence::LoadOutcome::Corrupted) => {
+            let fallback = persistence::corrupted_recovery_state();
+            protocol_engine.restore_provisioning_snapshot(fallback.provisioning);
+            protocol_engine.restore_key_store(fallback.key_store);
+            protocol_engine.restore_auth_snapshot(fallback.auth);
+        }
+        Ok(persistence::LoadOutcome::Empty) | Err(_) => {}
+    }
+    #[cfg(feature = "developer-mode")]
+    protocol_engine.reconcile_boot();
+    #[cfg(feature = "developer-mode")]
+    let _ = persistence::FlashStateStore::save(&persistence::PersistedState {
+        provisioning: protocol_engine.provisioning_snapshot(),
+        key_store: protocol_engine.key_store().snapshot(),
+        auth: protocol_engine.auth_snapshot().clone(),
+    });
+    let mut led_is_on = false;
+    let mut next_toggle_at = timer.get_counter().ticks();
+    #[cfg(feature = "developer-mode")]
+    let mut host_connected = false;
+
+    loop {
+        #[cfg(feature = "developer-mode")]
+        if usb_dev.poll(&mut [&mut serial]) {
+            let dtr = serial.dtr();
+            if dtr && !host_connected {
+                host_connected = true;
+            } else if !dtr && host_connected {
+                host_connected = false;
+            }
+
+            if host_connected
+                && let Ok(count) = serial.read(&mut buf)
+                && count > 0
+            {
+                let prior_provisioning = protocol_engine.provisioning_snapshot();
+                let prior_key_store = protocol_engine.key_store().snapshot();
+                let prior_auth = protocol_engine.auth_snapshot().clone();
+                let mut response = protocol_engine.handle_bytes(&buf[..count]);
+                let mut reboot_requested = false;
+                if response.code == StatusCode::Success.as_u8() {
+                    let current_provisioning = protocol_engine.provisioning_snapshot();
+                    let current_key_store = protocol_engine.key_store().snapshot();
+                    let current_auth = protocol_engine.auth_snapshot().clone();
+                    if current_provisioning != prior_provisioning
+                        || current_key_store != prior_key_store
+                        || current_auth != prior_auth
+                    {
+                        let persist_result = persistence::FlashStateStore::save(&persistence::PersistedState {
+                            provisioning: current_provisioning.clone(),
+                            key_store: current_key_store.clone(),
+                            auth: current_auth.clone(),
+                        });
+                        if persist_result.is_err() {
+                            protocol_engine.restore_provisioning_snapshot(prior_provisioning);
+                            protocol_engine.restore_key_store(prior_key_store);
+                            protocol_engine.restore_auth_snapshot(prior_auth);
+                            let _ = protocol_engine.take_firmware_action();
+                            response = status_response(StatusCode::InternalError, &[]);
+                        }
+                    }
+                }
+                if response.code == StatusCode::Success.as_u8()
+                    && let Some(action) = protocol_engine.take_firmware_action()
+                {
+                    match action {
+                        FirmwareAction::DeveloperStoreFault(action) => {
+                            if persistence::FlashStateStore::inject_fault(action).is_err() {
+                                response = status_response(StatusCode::InternalError, &[]);
+                            }
+                        }
+                        FirmwareAction::DeveloperReboot => {
+                            reboot_requested = true;
+                        }
+                    }
+                }
+                if let Some(encoded) = protocol::protocol::encode_frame(&response) {
+                    let _ = serial.write(&encoded);
+                }
+                if reboot_requested && response.code == StatusCode::Success.as_u8() {
+                    hal::reboot::reboot(
+                        hal::reboot::RebootKind::Normal,
+                        hal::reboot::RebootArch::Riscv,
+                    );
+                }
+                clear_transient_buffer(&mut buf[..count]);
+            }
+        }
+
+        #[cfg(feature = "developer-mode")]
+        if host_connected {
+            logging::flush(&mut serial);
+        }
+
+        #[cfg(not(feature = "developer-mode"))]
+        logging::flush();
+
+        let now = timer.get_counter().ticks();
+        if now >= next_toggle_at {
+            led_is_on = !led_is_on;
+
+            if led_is_on {
+                led.set_high().ok();
+                next_toggle_at = now + LED_ON_TICKS;
+            } else {
+                led.set_low().ok();
+                next_toggle_at = now + LED_OFF_TICKS;
+            }
+        }
+    }
+}
+
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+fn halt() -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+#[cfg(not(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm"))))]
+fn main() {}
