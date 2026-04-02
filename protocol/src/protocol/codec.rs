@@ -1,0 +1,330 @@
+use heapless::Vec;
+
+use super::frame::{
+    HEADER_LEN, MAX_FRAME_LEN, MAX_PAYLOAD_LEN, MessageKind, PROTOCOL_VERSION, ProtocolFrame,
+    RESERVED_FLAG_MASK,
+};
+use super::state::{
+    DeveloperResetOutcome, DeviceState, ExportPolicy, KeyAlgorithm, KeyDestroyResult,
+    KeyListEntry, KeyMaterialEnvelope, KeyMetadataView, KeyOrigin,
+    KeyRecordResult, KeyStoreStatus, LifecycleStatus, LockResult, PutPersistentKeyRequest,
+    RecoveryResult, SessionState, StateRevision, TransitionResult, ZeroizeOutcome,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum StatusCode {
+    Success = 0x00,
+    FormatError = 0x01,
+    VersionError = 0x02,
+    CommandError = 0x03,
+    ValidationError = 0x04,
+    StateError = 0x05,
+    AuthorizationError = 0x06,
+    ReplayError = 0x07,
+    InternalError = 0x08,
+}
+
+impl StatusCode {
+    #[must_use]
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecodeError {
+    Truncated,
+    InvalidKind,
+    OversizedPayload,
+    InvalidFlags,
+    LengthMismatch,
+}
+
+#[must_use]
+pub fn encode_frame(frame: &ProtocolFrame) -> Option<Vec<u8, MAX_FRAME_LEN>> {
+    let payload_len = u16::try_from(frame.payload_len()).ok()?;
+    let mut encoded = Vec::new();
+    encoded.push(frame.version).ok()?;
+    encoded.push(frame.kind as u8).ok()?;
+    encoded.push(frame.code).ok()?;
+    encoded.push(frame.flags).ok()?;
+    encoded.extend_from_slice(&payload_len.to_le_bytes()).ok()?;
+    encoded.extend_from_slice(&frame.payload).ok()?;
+    Some(encoded)
+}
+
+/// # Errors
+///
+/// Returns `DecodeError` when the provided bytes do not form a valid bounded
+/// protocol frame.
+pub fn decode_frame(bytes: &[u8]) -> Result<ProtocolFrame, DecodeError> {
+    if bytes.len() < HEADER_LEN {
+        return Err(DecodeError::Truncated);
+    }
+
+    let kind = MessageKind::from_byte(bytes[1]).ok_or(DecodeError::InvalidKind)?;
+    let flags = bytes[3];
+    if flags & RESERVED_FLAG_MASK != 0 {
+        return Err(DecodeError::InvalidFlags);
+    }
+
+    let payload_len = usize::from(u16::from_le_bytes([bytes[4], bytes[5]]));
+    if payload_len > MAX_PAYLOAD_LEN {
+        return Err(DecodeError::OversizedPayload);
+    }
+
+    if bytes.len() != HEADER_LEN + payload_len {
+        return Err(DecodeError::LengthMismatch);
+    }
+
+    let mut payload = Vec::new();
+    payload
+        .extend_from_slice(&bytes[HEADER_LEN..HEADER_LEN + payload_len])
+        .map_err(|()| DecodeError::OversizedPayload)?;
+
+    Ok(ProtocolFrame {
+        version: bytes[0],
+        kind,
+        code: bytes[2],
+        flags,
+        payload,
+    })
+}
+
+#[must_use]
+pub fn status_response(status: StatusCode, payload: &[u8]) -> ProtocolFrame {
+    ProtocolFrame::new(MessageKind::Response, status.as_u8(), 0, payload).unwrap_or_else(|| {
+        ProtocolFrame {
+            version: PROTOCOL_VERSION,
+            kind: MessageKind::Response,
+            code: StatusCode::InternalError.as_u8(),
+            flags: 0,
+            payload: Vec::new(),
+        }
+    })
+}
+
+pub fn clear_bytes(bytes: &mut [u8]) {
+    for byte in bytes {
+        *byte = 0;
+    }
+}
+
+#[must_use]
+pub fn protocol_version_response() -> ProtocolFrame {
+    status_response(StatusCode::Success, &[PROTOCOL_VERSION])
+}
+
+#[must_use]
+pub fn encode_device_status_payload(
+    device_state: DeviceState,
+    session_state: SessionState,
+) -> [u8; 2] {
+    [device_state as u8, session_state as u8]
+}
+
+#[must_use]
+pub fn encode_lifecycle_status_payload(status: LifecycleStatus) -> [u8; 4] {
+    [
+        status.state as u8,
+        u8::from(status.owner_present),
+        u8::from(status.recovery_required),
+        u8::from(status.pending_transition_present),
+    ]
+}
+
+#[must_use]
+pub fn encode_key_store_status_payload(status: KeyStoreStatus) -> [u8; 5] {
+    [
+        status.store_state as u8,
+        status.key_count,
+        status.free_slots,
+        u8::from(status.rollback_detected),
+        u8::from(status.corruption_detected),
+    ]
+}
+
+#[must_use]
+pub fn encode_transition_result_payload(result: TransitionResult) -> [u8; 9] {
+    let transition_id = result.transition_id.to_le_bytes();
+    let revision = result.revision_counter.to_le_bytes();
+    [
+        result.state as u8,
+        transition_id[0],
+        transition_id[1],
+        transition_id[2],
+        transition_id[3],
+        revision[0],
+        revision[1],
+        revision[2],
+        revision[3],
+    ]
+}
+
+#[must_use]
+pub fn encode_state_revision_payload(result: StateRevision) -> [u8; 5] {
+    let revision = result.revision_counter.to_le_bytes();
+    [
+        result.state as u8,
+        revision[0],
+        revision[1],
+        revision[2],
+        revision[3],
+    ]
+}
+
+#[must_use]
+pub fn encode_lock_result_payload(result: LockResult) -> [u8; 2] {
+    [result.state as u8, result.reason_code]
+}
+
+#[must_use]
+pub fn encode_recovery_result_payload(result: RecoveryResult) -> [u8; 2] {
+    [result.state as u8, u8::from(result.recovery_required)]
+}
+
+#[must_use]
+pub fn encode_zeroize_payload(result: ZeroizeOutcome) -> [u8; 5] {
+    [
+        result.result_state as u8,
+        u8::from(result.owner_binding_cleared),
+        u8::from(result.secret_storage_cleared),
+        u8::from(result.transient_buffers_cleared),
+        u8::from(result.requires_reprovisioning),
+    ]
+}
+
+#[must_use]
+pub fn encode_developer_reset_payload(result: DeveloperResetOutcome) -> [u8; 4] {
+    [
+        result.result_state as u8,
+        u8::from(result.owner_binding_cleared),
+        u8::from(result.pending_transition_cleared),
+        u8::from(result.transient_buffers_cleared),
+    ]
+}
+
+#[must_use]
+pub fn encode_key_record_result_payload(result: KeyRecordResult) -> [u8; 10] {
+    let record_revision = result.record_revision.to_le_bytes();
+    let store_revision = result.store_revision.to_le_bytes();
+    [
+        result.key_id,
+        result.lifecycle_state as u8,
+        record_revision[0],
+        record_revision[1],
+        record_revision[2],
+        record_revision[3],
+        store_revision[0],
+        store_revision[1],
+        store_revision[2],
+        store_revision[3],
+    ]
+}
+
+#[must_use]
+pub fn encode_key_metadata_payload(view: KeyMetadataView) -> [u8; 10] {
+    let record_revision = view.record_revision.to_le_bytes();
+    [
+        view.key_id,
+        view.algorithm as u8,
+        view.origin as u8,
+        view.usage_mask,
+        view.export_policy as u8,
+        view.lifecycle_state as u8,
+        record_revision[0],
+        record_revision[1],
+        record_revision[2],
+        record_revision[3],
+    ]
+}
+
+#[must_use]
+pub fn encode_key_destroy_payload(result: KeyDestroyResult) -> [u8; 4] {
+    [
+        result.key_id,
+        result.lifecycle_state as u8,
+        u8::from(result.material_cleared),
+        u8::from(result.tombstone_committed),
+    ]
+}
+
+#[must_use]
+pub fn encode_key_list_payload(entries: &[KeyListEntry]) -> Option<Vec<u8, MAX_PAYLOAD_LEN>> {
+    let mut payload = Vec::new();
+    let count = u8::try_from(entries.len()).ok()?;
+    payload.push(count).ok()?;
+    for entry in entries {
+        payload.push(entry.key_id).ok()?;
+        payload.push(entry.algorithm as u8).ok()?;
+        payload.push(entry.lifecycle_state as u8).ok()?;
+        payload.push(entry.usage_mask).ok()?;
+        payload.push(entry.export_policy as u8).ok()?;
+    }
+    Some(payload)
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the payload does not contain a
+/// 4-byte transition identifier followed by the required marker.
+pub fn decode_transition_request(payload: &[u8], marker: u8) -> Result<u32, StatusCode> {
+    if payload.len() != 5 || payload[4] != marker {
+        return Err(StatusCode::ValidationError);
+    }
+    Ok(u32::from_le_bytes([
+        payload[0], payload[1], payload[2], payload[3],
+    ]))
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the persistent-key payload is
+/// malformed or contains unsupported enum values.
+pub fn decode_put_persistent_key_request(payload: &[u8]) -> Result<PutPersistentKeyRequest, StatusCode> {
+    if payload.len() < 7 {
+        return Err(StatusCode::ValidationError);
+    }
+    let key_id = payload[0];
+    let algorithm = KeyAlgorithm::from_byte(payload[1]).ok_or(StatusCode::ValidationError)?;
+    let origin = KeyOrigin::from_byte(payload[2]).ok_or(StatusCode::ValidationError)?;
+    let usage_mask = payload[3];
+    let export_policy = ExportPolicy::from_byte(payload[4]).ok_or(StatusCode::ValidationError)?;
+    let material_len = usize::from(payload[5]);
+    if material_len == 0 || payload.len() != 6 + material_len {
+        return Err(StatusCode::ValidationError);
+    }
+    let material = KeyMaterialEnvelope::try_from_bytes(origin, &payload[6..])
+        .ok_or(StatusCode::ValidationError)?;
+    Ok(PutPersistentKeyRequest {
+        key_id,
+        algorithm,
+        origin,
+        usage_mask,
+        export_policy,
+        material,
+    })
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the payload does not contain the
+/// expected key identifier and marker.
+pub fn decode_key_marker_request(payload: &[u8], marker: &[u8]) -> Result<u8, StatusCode> {
+    if payload.len() != marker.len() + 1 || &payload[1..] != marker {
+        return Err(StatusCode::ValidationError);
+    }
+    Ok(payload[0])
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the payload does not contain a
+/// single key identifier byte.
+pub fn decode_key_id_request(payload: &[u8]) -> Result<u8, StatusCode> {
+    if payload.len() != 1 {
+        return Err(StatusCode::ValidationError);
+    }
+    Ok(payload[0])
+}

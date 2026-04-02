@@ -1,0 +1,11 @@
+[package]
+name = "host_tools"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+protocol = { package = "rp_hsm", path = "../protocol" }
+serialport = "4.8.1"
+
+[lints]
+workspace = true
