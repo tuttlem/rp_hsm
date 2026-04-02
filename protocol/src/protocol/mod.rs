@@ -19,15 +19,18 @@ pub use parser::{
 };
 pub use state::{
     AccessFailureCounter, AuthSnapshot, AuthenticationChallenge, AuthorityRole,
-    CredentialKind, CredentialRecord, DEVELOPER_RESET_COMPLETION_FLAGS, DeveloperResetOutcome, DeviceState,
+    CredentialKind, CredentialRecord, CryptoCapabilities, CryptoPersistentState,
+    CryptoServiceFlags, DEVELOPER_RESET_COMPLETION_FLAGS, DeveloperResetOutcome, DeviceState,
     ExportPolicy, KeyAlgorithm, KeyDestroyResult, KeyLifecycleState, KeyListEntry,
     KeyMetadata, KeyMetadataView, KeyOrigin, KeyRecordResult, KeyStoreRecord, KeyStoreSnapshot,
     KeyStoreState, KeyStoreStatus, LifecycleStatus, LockResult, MAX_KEY_JOURNAL_RECORDS,
-    MAX_KEY_LIST_ENTRIES, MAX_KEY_MATERIAL_LEN, MAX_PERSISTENT_KEYS, PersistentKeyStore,
+    MAX_KEY_LIST_ENTRIES, MAX_KEY_MATERIAL_LEN, MAX_PERSISTENT_KEYS, MAX_RANDOM_OUTPUT_LEN,
+    MAX_SIGNATURE_LEN, PersistentKeyStore, P256_PUBLIC_KEY_LEN, P256_SIGNATURE_LEN,
+    SIGNATURE_ALGORITHM_FLAGS, USAGE_SIGN, USAGE_WRAP_IMPORT, VERIFY_ALGORITHM_FLAGS,
     ProvisioningRecord, ProvisioningSnapshot, PutPersistentKeyRequest, RECORD_VERSION,
     RecoveryPolicy, RecoveryResult, SessionLifecycleState, SessionRecord, SessionState,
     SessionStatus, SessionTracker, StateRevision, TransitionIntent, TransitionResult,
     TransitionType, ZEROIZE_COMPLETION_FLAGS, ZeroizeOutcome, developer_mode_session,
-    developer_reset_marker, finalize_marker, recovery_marker, reactivate_marker,
-    revoke_marker, unlock_marker, zeroize_marker,
+    developer_reset_marker, ed25519_public_key_from_seed, finalize_marker, recovery_marker,
+    reactivate_marker, revoke_marker, unlock_marker, zeroize_marker,
 };

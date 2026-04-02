@@ -22,8 +22,8 @@ use panic_halt as _;
     feature = "developer-mode"
 ))]
 use protocol::protocol::{
-    DeviceState, FirmwareAction, ProtocolEngine, SessionState, StatusCode,
-    clear_transient_buffer, status_response,
+    DeviceState, FirmwareAction, HEADER_LEN, MAX_FRAME_LEN, MAX_PAYLOAD_LEN, ProtocolEngine,
+    SessionState, StatusCode, clear_transient_buffer, status_response,
 };
 #[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
 use rp235x_hal as hal;
@@ -109,11 +109,23 @@ fn main() -> ! {
         .build();
 
     #[cfg(feature = "developer-mode")]
-    let mut buf = [0u8; 64];
+    let mut io_buf = [0u8; 64];
+    #[cfg(feature = "developer-mode")]
+    let mut frame_buf = [0u8; MAX_FRAME_LEN];
+    #[cfg(feature = "developer-mode")]
+    let mut frame_len = 0usize;
     #[cfg(feature = "developer-mode")]
     let mut protocol_engine = ProtocolEngine::new(DeviceState::Factory, SessionState::Developer);
     #[cfg(feature = "developer-mode")]
     protocol_engine.set_developer_mode(true);
+    #[cfg(feature = "developer-mode")]
+    if let Ok(Some(boot_random)) = hal::rom_data::sys_info_api::boot_random() {
+        let mut seed = [0u8; 32];
+        let boot_bytes = boot_random.0.to_le_bytes();
+        seed[..16].copy_from_slice(&boot_bytes);
+        seed[16..].copy_from_slice(&boot_bytes);
+        protocol_engine.seed_rng(seed);
+    }
     #[cfg(feature = "developer-mode")]
     #[cfg(feature = "developer-mode")]
     match persistence::FlashStateStore::load() {
@@ -121,12 +133,14 @@ fn main() -> ! {
             protocol_engine.restore_provisioning_snapshot(state.provisioning);
             protocol_engine.restore_key_store(state.key_store);
             protocol_engine.restore_auth_snapshot(state.auth);
+            protocol_engine.restore_crypto_persistent_state(state.crypto);
         }
         Ok(persistence::LoadOutcome::Corrupted) => {
             let fallback = persistence::corrupted_recovery_state();
             protocol_engine.restore_provisioning_snapshot(fallback.provisioning);
             protocol_engine.restore_key_store(fallback.key_store);
             protocol_engine.restore_auth_snapshot(fallback.auth);
+            protocol_engine.restore_crypto_persistent_state(fallback.crypto);
         }
         Ok(persistence::LoadOutcome::Empty) | Err(_) => {}
     }
@@ -137,6 +151,7 @@ fn main() -> ! {
         provisioning: protocol_engine.provisioning_snapshot(),
         key_store: protocol_engine.key_store().snapshot(),
         auth: protocol_engine.auth_snapshot().clone(),
+        crypto: protocol_engine.crypto_persistent_state(),
     });
     let mut led_is_on = false;
     let mut next_toggle_at = timer.get_counter().ticks();
@@ -154,31 +169,71 @@ fn main() -> ! {
             }
 
             if host_connected
-                && let Ok(count) = serial.read(&mut buf)
+                && let Ok(count) = serial.read(&mut io_buf)
                 && count > 0
             {
+                let available = MAX_FRAME_LEN.saturating_sub(frame_len);
+                let copy_len = count.min(available);
+                frame_buf[frame_len..frame_len + copy_len].copy_from_slice(&io_buf[..copy_len]);
+                frame_len = frame_len.saturating_add(copy_len);
+                clear_transient_buffer(&mut io_buf[..count]);
+
+                if frame_len < HEADER_LEN {
+                    continue;
+                }
+
+                let payload_len = usize::from(u16::from_le_bytes([frame_buf[4], frame_buf[5]]));
+                if payload_len > MAX_PAYLOAD_LEN {
+                    let response = status_response(StatusCode::FormatError, &[]);
+                    if let Some(encoded) = protocol::protocol::encode_frame(&response) {
+                        let _ = serial.write(&encoded);
+                    }
+                    clear_transient_buffer(&mut frame_buf[..frame_len]);
+                    frame_len = 0;
+                    continue;
+                }
+
+                let expected_len = HEADER_LEN.saturating_add(payload_len);
+                if expected_len > MAX_FRAME_LEN {
+                    let response = status_response(StatusCode::FormatError, &[]);
+                    if let Some(encoded) = protocol::protocol::encode_frame(&response) {
+                        let _ = serial.write(&encoded);
+                    }
+                    clear_transient_buffer(&mut frame_buf[..frame_len]);
+                    frame_len = 0;
+                    continue;
+                }
+                if frame_len < expected_len {
+                    continue;
+                }
+
                 let prior_provisioning = protocol_engine.provisioning_snapshot();
                 let prior_key_store = protocol_engine.key_store().snapshot();
                 let prior_auth = protocol_engine.auth_snapshot().clone();
-                let mut response = protocol_engine.handle_bytes(&buf[..count]);
+                let prior_crypto = protocol_engine.crypto_persistent_state();
+                let mut response = protocol_engine.handle_bytes(&frame_buf[..expected_len]);
                 let mut reboot_requested = false;
                 if response.code == StatusCode::Success.as_u8() {
                     let current_provisioning = protocol_engine.provisioning_snapshot();
                     let current_key_store = protocol_engine.key_store().snapshot();
                     let current_auth = protocol_engine.auth_snapshot().clone();
+                    let current_crypto = protocol_engine.crypto_persistent_state();
                     if current_provisioning != prior_provisioning
                         || current_key_store != prior_key_store
                         || current_auth != prior_auth
+                        || current_crypto != prior_crypto
                     {
                         let persist_result = persistence::FlashStateStore::save(&persistence::PersistedState {
                             provisioning: current_provisioning.clone(),
                             key_store: current_key_store.clone(),
                             auth: current_auth.clone(),
+                            crypto: current_crypto,
                         });
                         if persist_result.is_err() {
                             protocol_engine.restore_provisioning_snapshot(prior_provisioning);
                             protocol_engine.restore_key_store(prior_key_store);
                             protocol_engine.restore_auth_snapshot(prior_auth);
+                            protocol_engine.restore_crypto_persistent_state(prior_crypto);
                             let _ = protocol_engine.take_firmware_action();
                             response = status_response(StatusCode::InternalError, &[]);
                         }
@@ -201,13 +256,14 @@ fn main() -> ! {
                 if let Some(encoded) = protocol::protocol::encode_frame(&response) {
                     let _ = serial.write(&encoded);
                 }
+                clear_transient_buffer(&mut frame_buf[..frame_len]);
+                frame_len = 0;
                 if reboot_requested && response.code == StatusCode::Success.as_u8() {
                     hal::reboot::reboot(
                         hal::reboot::RebootKind::Normal,
                         hal::reboot::RebootArch::Riscv,
                     );
                 }
-                clear_transient_buffer(&mut buf[..count]);
             }
         }
 

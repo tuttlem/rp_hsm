@@ -19,6 +19,7 @@ embedded-hal = "1.0.0"
 heapless = "0.8.0"
 panic-halt = "1.0.0"
 protocol = { package = "rp_hsm", path = "../protocol" }
+rand_core = "0.6.4"
 rp-binary-info = "0.1.0"
 rp235x-hal = { git = "https://github.com/rp-rs/rp-hal", version = "0.4.0", features = [
     "binary-info",

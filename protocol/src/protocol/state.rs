@@ -1,4 +1,6 @@
 use heapless::Vec;
+use rand_chacha::ChaCha8Rng;
+use rand_core::{RngCore, SeedableRng};
 
 use super::codec::StatusCode;
 use super::command::{CommandDefinition, ReplayPolicy};
@@ -12,9 +14,27 @@ pub const MAX_FAILURE_COUNTERS: usize = 4;
 pub const ZEROIZE_COMPLETION_FLAGS: u8 = 0x0f;
 pub const DEVELOPER_RESET_COMPLETION_FLAGS: u8 = 0x07;
 pub const MAX_PERSISTENT_KEYS: usize = 8;
-pub const MAX_KEY_MATERIAL_LEN: usize = 24;
+pub const MAX_KEY_MATERIAL_LEN: usize = 32;
 pub const MAX_KEY_LIST_ENTRIES: usize = MAX_PERSISTENT_KEYS;
 pub const MAX_KEY_JOURNAL_RECORDS: usize = 24;
+pub const MAX_CRYPTO_MESSAGE_LEN: usize = 128;
+pub const MAX_SIGNATURE_LEN: usize = 64;
+pub const ED25519_PUBLIC_KEY_LEN: usize = 32;
+pub const ED25519_SIGNATURE_LEN: usize = 64;
+pub const P256_PUBLIC_KEY_LEN: usize = 33;
+pub const P256_SIGNATURE_LEN: usize = 64;
+pub const MAX_RANDOM_OUTPUT_LEN: usize = 64;
+pub const MAX_WRAPPED_CIPHERTEXT_LEN: usize = 32;
+pub const MAX_WRAPPED_TAG_LEN: usize = 28;
+pub const CRYPTO_SERVICE_VERSION: u8 = 1;
+pub const SERVICE_FLAG_SIGN: u8 = 0x01;
+pub const SERVICE_FLAG_VERIFY: u8 = 0x02;
+pub const SERVICE_FLAG_RANDOM: u8 = 0x04;
+pub const SERVICE_FLAG_WRAPPED_IMPORT: u8 = 0x08;
+pub const SIGNATURE_ALGORITHM_FLAGS: u8 = 0x01;
+pub const VERIFY_ALGORITHM_FLAGS: u8 = 0x03;
+pub const USAGE_SIGN: u8 = 0x01;
+pub const USAGE_WRAP_IMPORT: u8 = 0x20;
 
 const FINALIZE_MARKER: u8 = 0xa5;
 const REACTIVATE_MARKER: u8 = 0xa6;
@@ -106,6 +126,86 @@ pub enum AuthorizationMode {
 #[repr(u8)]
 pub enum CredentialKind {
     Marker = 0x01,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CryptoServiceFlags(pub u8);
+
+impl CryptoServiceFlags {
+    #[must_use]
+    pub const fn reviewed_v1() -> Self {
+        Self(
+            SERVICE_FLAG_SIGN
+                | SERVICE_FLAG_VERIFY
+                | SERVICE_FLAG_RANDOM
+                | SERVICE_FLAG_WRAPPED_IMPORT,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CryptoCapabilities {
+    pub service_version: u8,
+    pub operation_flags: CryptoServiceFlags,
+    pub sign_algorithm_flags: u8,
+    pub verify_algorithm_flags: u8,
+    pub max_message_len: u16,
+    pub max_signature_len: u16,
+    pub max_random_len: u8,
+    pub wrapped_import_enabled: bool,
+}
+
+impl Default for CryptoCapabilities {
+    fn default() -> Self {
+        Self {
+            service_version: CRYPTO_SERVICE_VERSION,
+            operation_flags: CryptoServiceFlags::reviewed_v1(),
+            sign_algorithm_flags: SIGNATURE_ALGORITHM_FLAGS,
+            verify_algorithm_flags: VERIFY_ALGORITHM_FLAGS,
+            max_message_len: u16::try_from(MAX_CRYPTO_MESSAGE_LEN).unwrap_or(0),
+            max_signature_len: u16::try_from(MAX_SIGNATURE_LEN).unwrap_or(0),
+            max_random_len: u8::try_from(MAX_RANDOM_OUTPUT_LEN).unwrap_or(0),
+            wrapped_import_enabled: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CryptoPersistentState {
+    pub policy_version: u8,
+    pub wrapped_import_count: u32,
+    pub last_wrapped_import_revision: u32,
+}
+
+impl Default for CryptoPersistentState {
+    fn default() -> Self {
+        Self {
+            policy_version: CRYPTO_SERVICE_VERSION,
+            wrapped_import_count: 0,
+            last_wrapped_import_revision: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CryptoRuntimeState {
+    pub capabilities: CryptoCapabilities,
+    pub persistent: CryptoPersistentState,
+    pub rng_seed: [u8; 32],
+    pub rng_counter: u64,
+    pub rng_healthy: bool,
+}
+
+impl Default for CryptoRuntimeState {
+    fn default() -> Self {
+        Self {
+            capabilities: CryptoCapabilities::default(),
+            persistent: CryptoPersistentState::default(),
+            rng_seed: *b"rp2350-hsm-dev-seed-crypto-v1!!!",
+            rng_counter: 0,
+            rng_healthy: true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -750,6 +850,37 @@ pub struct PutPersistentKeyRequest {
     pub usage_mask: u8,
     pub export_policy: ExportPolicy,
     pub material: KeyMaterialEnvelope,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignRequest {
+    pub key_id: u8,
+    pub algorithm: KeyAlgorithm,
+    pub message: Vec<u8, MAX_CRYPTO_MESSAGE_LEN>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifyRequest {
+    pub algorithm: KeyAlgorithm,
+    pub message: Vec<u8, MAX_CRYPTO_MESSAGE_LEN>,
+    pub public_key: Vec<u8, P256_PUBLIC_KEY_LEN>,
+    pub signature: Vec<u8, MAX_SIGNATURE_LEN>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RandomRequest {
+    pub requested_len: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportWrappedKeyRequest {
+    pub wrap_format_version: u8,
+    pub wrapping_key_id: u8,
+    pub target_algorithm: KeyAlgorithm,
+    pub target_usage_mask: u8,
+    pub target_export_policy: ExportPolicy,
+    pub ciphertext: Vec<u8, MAX_WRAPPED_CIPHERTEXT_LEN>,
+    pub integrity_tag: Vec<u8, MAX_WRAPPED_TAG_LEN>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1457,6 +1588,60 @@ impl PersistentKeyStore {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Returns `StatusCode::StateError` when the key is unavailable and
+    /// `StatusCode::AuthorizationError` when algorithm or usage policy does not match.
+    pub fn export_key_material_for_operation(
+        &self,
+        key_id: u8,
+        required_algorithm: KeyAlgorithm,
+        usage_mask: u8,
+        export_requested: bool,
+    ) -> Result<[u8; MAX_KEY_MATERIAL_LEN], StatusCode> {
+        self.assert_key_operation(key_id, usage_mask, export_requested)?;
+        let record = self.latest_live_record(key_id)?;
+        if record.metadata.algorithm != required_algorithm {
+            return Err(StatusCode::AuthorizationError);
+        }
+        if usize::from(record.material.material_len) != record.material.material_bytes.len()
+            || record.material.material_len == 0
+        {
+            return Err(StatusCode::StateError);
+        }
+
+        let mut material = [0u8; MAX_KEY_MATERIAL_LEN];
+        let material_len = usize::from(record.material.material_len);
+        material[..material_len].copy_from_slice(record.material.material_bytes.as_slice());
+        Ok(material)
+    }
+
+    /// # Errors
+    ///
+    /// Returns `StatusCode::StateError` when no destination slot remains or the
+    /// store is not ready for write.
+    pub fn import_wrapped_key(
+        &mut self,
+        algorithm: KeyAlgorithm,
+        usage_mask: u8,
+        export_policy: ExportPolicy,
+        plaintext_key: &[u8],
+    ) -> Result<KeyRecordResult, StatusCode> {
+        self.ensure_ready_for_write()?;
+        let key_id = self.next_import_key_id()?;
+        let material = KeyMaterialEnvelope::try_from_bytes(KeyOrigin::Imported, plaintext_key)
+            .ok_or(StatusCode::ValidationError)?;
+        let request = PutPersistentKeyRequest {
+            key_id,
+            algorithm,
+            origin: KeyOrigin::Imported,
+            usage_mask,
+            export_policy,
+            material,
+        };
+        self.put_persistent_key(&request)
+    }
+
     fn validate_put_request(request: &PutPersistentKeyRequest) -> Result<(), StatusCode> {
         if request.key_id == 0 {
             return Err(StatusCode::ValidationError);
@@ -1483,6 +1668,19 @@ impl PersistentKeyStore {
             return Err(StatusCode::StateError);
         }
         u8::try_from(self.journal.len()).map_err(|_| StatusCode::StateError)
+    }
+
+    fn next_import_key_id(&self) -> Result<u8, StatusCode> {
+        for key_id in 1..=u8::try_from(MAX_PERSISTENT_KEYS).unwrap_or(0) {
+            match self.find_latest_record(key_id) {
+                None => return Ok(key_id),
+                Some(record) if record.lifecycle_state == KeyLifecycleState::Destroyed => {
+                    return Ok(key_id)
+                }
+                Some(_) => {}
+            }
+        }
+        Err(StatusCode::StateError)
     }
 
     fn push_record(&mut self, record: KeyStoreRecord) -> Result<(), StatusCode> {
@@ -1551,6 +1749,87 @@ impl PersistentKeyStore {
         } else {
             KeyStoreState::Ready
         };
+    }
+}
+
+impl CryptoRuntimeState {
+    #[must_use]
+    pub fn capabilities(&self) -> CryptoCapabilities {
+        self.capabilities
+    }
+
+    pub fn restore_persistent_state(&mut self, state: CryptoPersistentState) {
+        self.persistent = state;
+    }
+
+    #[must_use]
+    pub fn persistent_state(&self) -> CryptoPersistentState {
+        self.persistent
+    }
+
+    pub fn seed_rng(&mut self, seed: [u8; 32]) {
+        self.rng_seed = seed;
+        self.rng_counter = 0;
+        self.rng_healthy = true;
+    }
+
+    pub fn set_rng_health(&mut self, healthy: bool) {
+        self.rng_healthy = healthy;
+    }
+
+    /// # Errors
+    ///
+    /// Returns `StatusCode::StateError` when the RNG backend is marked unhealthy
+    /// and `StatusCode::ValidationError` when the requested output size is out of range.
+    pub fn generate_random_bytes(
+        &mut self,
+        requested_len: usize,
+    ) -> Result<Vec<u8, MAX_RANDOM_OUTPUT_LEN>, StatusCode> {
+        if requested_len == 0 || requested_len > MAX_RANDOM_OUTPUT_LEN {
+            return Err(StatusCode::ValidationError);
+        }
+        if !self.rng_healthy {
+            return Err(StatusCode::StateError);
+        }
+
+        let mut derived_seed = self.rng_seed;
+        let counter = self.rng_counter.to_le_bytes();
+        for (idx, byte) in counter.iter().enumerate() {
+            derived_seed[idx] ^= *byte;
+            derived_seed[idx + 8] ^= byte.rotate_left(1);
+        }
+        let mut rng = ChaCha8Rng::from_seed(derived_seed);
+        let mut output = [0u8; MAX_RANDOM_OUTPUT_LEN];
+        rng.fill_bytes(&mut output[..requested_len]);
+        self.rng_counter = self.rng_counter.saturating_add(1);
+
+        let mut bytes = Vec::<u8, MAX_RANDOM_OUTPUT_LEN>::new();
+        bytes
+            .extend_from_slice(&output[..requested_len])
+            .map_err(|()| StatusCode::InternalError)?;
+        clear_secret_array(&mut output);
+        clear_secret_array(&mut derived_seed);
+        Ok(bytes)
+    }
+
+    pub fn note_wrapped_import(&mut self, store_revision: u32) {
+        self.persistent.wrapped_import_count = self.persistent.wrapped_import_count.saturating_add(1);
+        self.persistent.last_wrapped_import_revision = store_revision;
+    }
+}
+
+#[must_use]
+pub fn ed25519_public_key_from_seed(seed: &[u8]) -> Option<[u8; ED25519_PUBLIC_KEY_LEN]> {
+    if seed.len() != MAX_KEY_MATERIAL_LEN {
+        return None;
+    }
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(seed.try_into().ok()?);
+    Some(signing_key.verifying_key().to_bytes())
+}
+
+pub fn clear_secret_array<const N: usize>(buffer: &mut [u8; N]) {
+    for byte in buffer {
+        *byte = 0;
     }
 }
 

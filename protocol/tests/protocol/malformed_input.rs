@@ -1,5 +1,6 @@
 use rp_hsm::protocol::{
-    MessageKind, PROTOCOL_VERSION, ProtocolEngine, StatusCode, decode_frame, encode_frame,
+    MAX_PAYLOAD_LEN, MessageKind, PROTOCOL_VERSION, ProtocolEngine, StatusCode, decode_frame,
+    encode_frame,
 };
 
 #[test]
@@ -14,7 +15,15 @@ fn truncated_frame_is_rejected() {
 
 #[test]
 fn oversized_payload_is_rejected() {
-    let bytes = [PROTOCOL_VERSION, MessageKind::Request as u8, 0x01, 0x00, 0x31, 0x00];
+    let oversized = u16::try_from(MAX_PAYLOAD_LEN + 1).unwrap_or(u16::MAX).to_le_bytes();
+    let bytes = [
+        PROTOCOL_VERSION,
+        MessageKind::Request as u8,
+        0x01,
+        0x00,
+        oversized[0],
+        oversized[1],
+    ];
     let result = decode_frame(&bytes);
     assert!(matches!(
         result,

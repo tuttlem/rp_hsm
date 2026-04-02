@@ -128,6 +128,35 @@ Only add crypto operations after the key model exists.
 - Add hash, HMAC, or KDF services only when they support real product use
   cases.
 
+Planned operation progression after `005-core-crypto-operations`:
+
+- `005` v1 crypto surface remains intentionally narrow:
+  - managed `Ed25519` signing
+  - public detached verification for `Ed25519` and `P-256`
+  - bounded random-byte generation
+  - wrapped key import only
+- Post-`005` first-tier additions should focus on architecture-bearing services:
+  - `AES-256-GCM`
+  - `HMAC-SHA-256`
+  - `SHA-256`
+  - `HKDF-SHA-256`
+  - `ECDSA P-256` signing
+  - `ECDH P-256`
+- Post-`005` second-tier additions are acceptable only after policy, audit, and
+  operator tooling are mature enough to support them safely:
+  - AES key wrap
+  - AES-CMAC
+  - `SHA-384`
+  - `ECDSA P-384`
+  - `Ed25519` public-key verification and compatibility extensions beyond the
+    initial signing path
+  - `X25519`
+- Explicitly excluded from near-term scope unless a later spec justifies them:
+  - plaintext key export
+  - general-purpose decrypt/encrypt helpers without a clear custody use case
+  - RSA key management and RSA signing
+  - password-oriented services such as `PBKDF2`
+
 Exit criteria:
 
 - Every crypto operation maps to explicit permissions and key usage flags.

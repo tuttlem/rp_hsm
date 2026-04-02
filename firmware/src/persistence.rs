@@ -3,10 +3,10 @@ use core::slice;
 use critical_section::with;
 use heapless::Vec;
 use protocol::protocol::{
-    AuthSnapshot, AuthorityRole, CredentialKind, CredentialRecord, DeveloperStoreFaultAction,
-    DeviceState, ExportPolicy, KeyAlgorithm, KeyLifecycleState, KeyMetadata, KeyOrigin,
-    KeyStoreRecord, KeyStoreSnapshot, MAX_KEY_JOURNAL_RECORDS, MAX_KEY_MATERIAL_LEN,
-    ProvisioningSnapshot, RecoveryPolicy, TransitionIntent, TransitionType,
+    AuthSnapshot, AuthorityRole, CredentialKind, CredentialRecord, CryptoPersistentState,
+    DeveloperStoreFaultAction, DeviceState, ExportPolicy, KeyAlgorithm, KeyLifecycleState,
+    KeyMetadata, KeyOrigin, KeyStoreRecord, KeyStoreSnapshot, MAX_KEY_JOURNAL_RECORDS,
+    MAX_KEY_MATERIAL_LEN, ProvisioningSnapshot, RecoveryPolicy, TransitionIntent, TransitionType,
 };
 use protocol::protocol::state::{
     AuthorizationMode, FreshnessAnchor, KeyMaterialEnvelope, LifecycleState, MaterialEncoding,
@@ -31,6 +31,7 @@ pub struct PersistedState {
     pub provisioning: ProvisioningSnapshot,
     pub key_store: KeyStoreSnapshot,
     pub auth: AuthSnapshot,
+    pub crypto: CryptoPersistentState,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -193,6 +194,7 @@ pub fn corrupted_recovery_state() -> PersistedState {
             anchor,
         },
         auth: AuthSnapshot::default(),
+        crypto: CryptoPersistentState::default(),
     }
 }
 
@@ -317,7 +319,8 @@ fn encode_state(
 ) -> Result<(), PersistenceError> {
     encode_provisioning(&state.provisioning, out)?;
     encode_key_store(&state.key_store, out)?;
-    encode_auth_snapshot(&state.auth, out)
+    encode_auth_snapshot(&state.auth, out)?;
+    encode_crypto_state(&state.crypto, out)
 }
 
 fn encode_provisioning(
@@ -415,6 +418,15 @@ fn encode_auth_snapshot(
     push_u32(out, snapshot.next_session_id)
 }
 
+fn encode_crypto_state(
+    snapshot: &CryptoPersistentState,
+    out: &mut Vec<u8, PAYLOAD_CAPACITY>,
+) -> Result<(), PersistenceError> {
+    push_u8(out, snapshot.policy_version)?;
+    push_u32(out, snapshot.wrapped_import_count)?;
+    push_u32(out, snapshot.last_wrapped_import_revision)
+}
+
 fn push_transition(
     transition: &TransitionIntent,
     out: &mut Vec<u8, PAYLOAD_CAPACITY>,
@@ -454,6 +466,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, PersistenceError> {
     let provisioning = decode_provisioning(&mut cursor)?;
     let key_store = decode_key_store(&mut cursor)?;
     let auth = decode_auth_snapshot(&mut cursor)?;
+    let crypto = decode_crypto_state(&mut cursor)?;
     if !cursor.is_at_end() {
         return Err(PersistenceError::DecodeFailure);
     }
@@ -461,6 +474,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, PersistenceError> {
         provisioning,
         key_store,
         auth,
+        crypto,
     })
 }
 
@@ -615,6 +629,14 @@ fn decode_auth_snapshot(cursor: &mut Cursor<'_>) -> Result<AuthSnapshot, Persist
         failure_counters,
         next_challenge_id: cursor.read_u32()?,
         next_session_id: cursor.read_u32()?,
+    })
+}
+
+fn decode_crypto_state(cursor: &mut Cursor<'_>) -> Result<CryptoPersistentState, PersistenceError> {
+    Ok(CryptoPersistentState {
+        policy_version: cursor.read_u8()?,
+        wrapped_import_count: cursor.read_u32()?,
+        last_wrapped_import_revision: cursor.read_u32()?,
     })
 }
 

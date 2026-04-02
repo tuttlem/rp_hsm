@@ -5,10 +5,13 @@ use super::frame::{
     RESERVED_FLAG_MASK,
 };
 use super::state::{
-    AuthorityRole, DeveloperResetOutcome, DeviceState, ExportPolicy, KeyAlgorithm, KeyDestroyResult,
-    KeyListEntry, KeyMaterialEnvelope, KeyMetadataView, KeyOrigin,
-    KeyRecordResult, KeyStoreStatus, LifecycleStatus, LockResult, PutPersistentKeyRequest,
-    RecoveryResult, SessionState, SessionStatus, StateRevision, TransitionResult, ZeroizeOutcome,
+    AuthorityRole, CryptoCapabilities, DeveloperResetOutcome, DeviceState, ExportPolicy,
+    ImportWrappedKeyRequest, KeyAlgorithm, KeyDestroyResult, KeyListEntry, KeyMaterialEnvelope,
+    KeyMetadataView, KeyOrigin, KeyRecordResult, KeyStoreStatus, LifecycleStatus, LockResult,
+    MAX_CRYPTO_MESSAGE_LEN, MAX_RANDOM_OUTPUT_LEN, MAX_SIGNATURE_LEN, MAX_WRAPPED_CIPHERTEXT_LEN,
+    MAX_WRAPPED_TAG_LEN, P256_PUBLIC_KEY_LEN, PutPersistentKeyRequest, RandomRequest,
+    RecoveryResult, SessionState, SessionStatus, SignRequest, StateRevision, TransitionResult,
+    VerifyRequest, ZeroizeOutcome,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -315,6 +318,193 @@ pub fn encode_key_list_payload(entries: &[KeyListEntry]) -> Option<Vec<u8, MAX_P
         payload.push(entry.export_policy as u8).ok()?;
     }
     Some(payload)
+}
+
+#[must_use]
+pub fn encode_crypto_capabilities_payload(
+    capabilities: CryptoCapabilities,
+) -> [u8; 10] {
+    [
+        capabilities.service_version,
+        capabilities.operation_flags.0,
+        capabilities.sign_algorithm_flags,
+        capabilities.verify_algorithm_flags,
+        capabilities.max_message_len.to_le_bytes()[0],
+        capabilities.max_message_len.to_le_bytes()[1],
+        capabilities.max_signature_len.to_le_bytes()[0],
+        capabilities.max_signature_len.to_le_bytes()[1],
+        capabilities.max_random_len,
+        u8::from(capabilities.wrapped_import_enabled),
+    ]
+}
+
+#[must_use]
+pub fn encode_signature_payload(signature: &[u8]) -> Option<Vec<u8, MAX_PAYLOAD_LEN>> {
+    let mut payload = Vec::new();
+    payload
+        .extend_from_slice(&u16::try_from(signature.len()).ok()?.to_le_bytes())
+        .ok()?;
+    payload.extend_from_slice(signature).ok()?;
+    Some(payload)
+}
+
+#[must_use]
+pub fn encode_verify_result_payload(verified: bool) -> [u8; 1] {
+    [u8::from(verified)]
+}
+
+#[must_use]
+pub fn encode_random_payload(bytes: &[u8]) -> Option<Vec<u8, MAX_PAYLOAD_LEN>> {
+    let mut payload = Vec::new();
+    payload.push(u8::try_from(bytes.len()).ok()?).ok()?;
+    payload.extend_from_slice(bytes).ok()?;
+    Some(payload)
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the signing request shape is malformed.
+pub fn decode_sign_request(payload: &[u8]) -> Result<SignRequest, StatusCode> {
+    if payload.len() < 4 {
+        return Err(StatusCode::ValidationError);
+    }
+    let key_id = payload[0];
+    let algorithm = KeyAlgorithm::from_byte(payload[1]).ok_or(StatusCode::ValidationError)?;
+    let message_len = usize::from(u16::from_le_bytes([payload[2], payload[3]]));
+    if message_len == 0 || message_len > MAX_CRYPTO_MESSAGE_LEN || payload.len() != 4 + message_len {
+        return Err(StatusCode::ValidationError);
+    }
+    let mut message = Vec::<u8, MAX_CRYPTO_MESSAGE_LEN>::new();
+    message
+        .extend_from_slice(&payload[4..])
+        .map_err(|()| StatusCode::ValidationError)?;
+    Ok(SignRequest {
+        key_id,
+        algorithm,
+        message,
+    })
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the verification request is malformed.
+pub fn decode_verify_request(payload: &[u8]) -> Result<VerifyRequest, StatusCode> {
+    if payload.len() < 7 {
+        return Err(StatusCode::ValidationError);
+    }
+    let algorithm = KeyAlgorithm::from_byte(payload[0]).ok_or(StatusCode::ValidationError)?;
+    let message_len = usize::from(u16::from_le_bytes([payload[1], payload[2]]));
+    if message_len == 0 || message_len > MAX_CRYPTO_MESSAGE_LEN {
+        return Err(StatusCode::ValidationError);
+    }
+    let public_key_len_index = 3 + message_len;
+    if payload.len() < public_key_len_index + 1 {
+        return Err(StatusCode::ValidationError);
+    }
+    let public_key_len = usize::from(payload[public_key_len_index]);
+    let signature_len_index = public_key_len_index + 1 + public_key_len;
+    if payload.len() < signature_len_index + 2 {
+        return Err(StatusCode::ValidationError);
+    }
+    let signature_len = usize::from(u16::from_le_bytes([
+        payload[signature_len_index],
+        payload[signature_len_index + 1],
+    ]));
+    let expected_len = signature_len_index + 2 + signature_len;
+    if payload.len() != expected_len
+        || public_key_len == 0
+        || public_key_len > P256_PUBLIC_KEY_LEN
+        || signature_len == 0
+        || signature_len > MAX_SIGNATURE_LEN
+    {
+        return Err(StatusCode::ValidationError);
+    }
+
+    let mut message = Vec::<u8, MAX_CRYPTO_MESSAGE_LEN>::new();
+    message
+        .extend_from_slice(&payload[3..3 + message_len])
+        .map_err(|()| StatusCode::ValidationError)?;
+    let mut public_key = Vec::<u8, P256_PUBLIC_KEY_LEN>::new();
+    public_key
+        .extend_from_slice(&payload[public_key_len_index + 1..public_key_len_index + 1 + public_key_len])
+        .map_err(|()| StatusCode::ValidationError)?;
+    let mut signature = Vec::<u8, MAX_SIGNATURE_LEN>::new();
+    signature
+        .extend_from_slice(&payload[signature_len_index + 2..])
+        .map_err(|()| StatusCode::ValidationError)?;
+
+    Ok(VerifyRequest {
+        algorithm,
+        message,
+        public_key,
+        signature,
+    })
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the random request is malformed.
+pub fn decode_random_request(payload: &[u8]) -> Result<RandomRequest, StatusCode> {
+    if payload.len() != 1 {
+        return Err(StatusCode::ValidationError);
+    }
+    let requested_len = payload[0];
+    if requested_len == 0 || usize::from(requested_len) > MAX_RANDOM_OUTPUT_LEN {
+        return Err(StatusCode::ValidationError);
+    }
+    Ok(RandomRequest { requested_len })
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the wrapped import request is malformed.
+pub fn decode_import_wrapped_key_request(
+    payload: &[u8],
+) -> Result<ImportWrappedKeyRequest, StatusCode> {
+    if payload.len() < 8 {
+        return Err(StatusCode::ValidationError);
+    }
+    let wrap_format_version = payload[0];
+    let wrapping_key_id = payload[1];
+    let target_algorithm = KeyAlgorithm::from_byte(payload[2]).ok_or(StatusCode::ValidationError)?;
+    let target_usage_mask = payload[3];
+    let target_export_policy =
+        ExportPolicy::from_byte(payload[4]).ok_or(StatusCode::ValidationError)?;
+    let ciphertext_len = usize::from(u16::from_le_bytes([payload[5], payload[6]]));
+    if ciphertext_len == 0 || ciphertext_len > MAX_WRAPPED_CIPHERTEXT_LEN {
+        return Err(StatusCode::ValidationError);
+    }
+    let tag_len_index = 7 + ciphertext_len;
+    if payload.len() < tag_len_index + 1 {
+        return Err(StatusCode::ValidationError);
+    }
+    let integrity_tag_len = usize::from(payload[tag_len_index]);
+    let expected_len = tag_len_index + 1 + integrity_tag_len;
+    if payload.len() != expected_len
+        || integrity_tag_len == 0
+        || integrity_tag_len > MAX_WRAPPED_TAG_LEN
+    {
+        return Err(StatusCode::ValidationError);
+    }
+
+    let mut ciphertext = Vec::<u8, MAX_WRAPPED_CIPHERTEXT_LEN>::new();
+    ciphertext
+        .extend_from_slice(&payload[7..7 + ciphertext_len])
+        .map_err(|()| StatusCode::ValidationError)?;
+    let mut integrity_tag = Vec::<u8, MAX_WRAPPED_TAG_LEN>::new();
+    integrity_tag
+        .extend_from_slice(&payload[tag_len_index + 1..])
+        .map_err(|()| StatusCode::ValidationError)?;
+
+    Ok(ImportWrappedKeyRequest {
+        wrap_format_version,
+        wrapping_key_id,
+        target_algorithm,
+        target_usage_mask,
+        target_export_policy,
+        ciphertext,
+        integrity_tag,
+    })
 }
 
 /// # Errors

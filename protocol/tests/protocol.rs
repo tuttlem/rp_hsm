@@ -46,3 +46,17 @@ mod session_invalidation;
 mod auth_lockout;
 #[path = "protocol/session_freshness.rs"]
 mod session_freshness;
+#[path = "protocol/crypto_fixtures.rs"]
+mod crypto_fixtures;
+#[path = "protocol/crypto_surface_validation.rs"]
+mod crypto_surface_validation;
+#[path = "protocol/managed_signing.rs"]
+mod managed_signing;
+#[path = "protocol/public_verification.rs"]
+mod public_verification;
+#[path = "protocol/random_generation.rs"]
+mod random_generation;
+#[path = "protocol/wrapped_import.rs"]
+mod wrapped_import;
+#[path = "protocol/high_risk_denials.rs"]
+mod high_risk_denials;

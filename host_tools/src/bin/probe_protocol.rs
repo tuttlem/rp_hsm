@@ -2,9 +2,14 @@ use std::env;
 use std::thread;
 use std::time::Duration;
 
+use chacha20poly1305::{
+    ChaCha20Poly1305, KeyInit,
+    aead::{AeadInPlace, generic_array::GenericArray},
+};
 use protocol::protocol::{
-    FLAG_INCLUDE_RESTRICTED, MessageKind, PROTOCOL_VERSION, ProtocolFrame, StatusCode,
-    developer_reset_marker, encode_frame, finalize_marker, unlock_marker,
+    FLAG_INCLUDE_RESTRICTED, KeyAlgorithm, MessageKind, PROTOCOL_VERSION, ProtocolFrame,
+    StatusCode, USAGE_WRAP_IMPORT, developer_reset_marker, ed25519_public_key_from_seed,
+    encode_frame, finalize_marker, unlock_marker,
 };
 
 const DEFAULT_BAUD: u32 = 115_200;
@@ -14,6 +19,8 @@ const REBOOT_SETTLE_MS: u64 = 1_500;
 const RECONNECT_ATTEMPTS: usize = 30;
 const READ_RETRY_ATTEMPTS: usize = 20;
 const READ_RETRY_DELAY_MS: u64 = 150;
+const ED25519_SEED: [u8; 32] = *b"0123456789abcdef0123456789abcdef";
+const WRAP_KEY: [u8; 32] = *b"wrap-key-material-for-hsm-test!!";
 
 type DynError = Box<dyn std::error::Error>;
 
@@ -31,6 +38,7 @@ fn main() -> Result<(), DynError> {
     port = ensure_factory_baseline(&config, port)?;
     probe_public_catalog(&mut *port)?;
     probe_unauthenticated_denial(&mut *port)?;
+    probe_crypto_capabilities(&mut *port)?;
 
     let bootstrap = authenticate(&mut *port, "Bootstrap", 0x02, b"BOOT")?;
     let transition_id = begin_provisioning(&mut *port, bootstrap, 2)?;
@@ -44,10 +52,29 @@ fn main() -> Result<(), DynError> {
     unlock_device(&mut *port, admin, 2)?;
 
     let key_manager = authenticate(&mut *port, "KeyManager", 0x06, b"KEYMG")?;
-    put_persistent_key(&mut *port, key_manager, 2, 0x01, b"seed-material")?;
-    list_persistent_keys(&mut *port, key_manager, 3)?;
-    replay_list_denied(&mut *port, key_manager, 3)?;
-    invalidate_session(&mut *port, key_manager, 4)?;
+    put_persistent_key(
+        &mut *port,
+        key_manager,
+        2,
+        0x01,
+        0x01,
+        &ED25519_SEED,
+    )?;
+    sign_and_verify(&mut *port, key_manager, 3, 4, 0x01, b"sign me")?;
+    generate_random(&mut *port, key_manager, 5, 64)?;
+    put_persistent_key(
+        &mut *port,
+        key_manager,
+        6,
+        0x07,
+        KeyAlgorithm::Aes256 as u8,
+        &WRAP_KEY,
+    )?;
+    import_wrapped_key(&mut *port, key_manager, 7, 0x07, &ED25519_SEED)?;
+    let key_manager = authenticate(&mut *port, "KeyManagerReadback", 0x06, b"KEYMG")?;
+    list_persistent_keys(&mut *port, key_manager, 2)?;
+    replay_list_denied(&mut *port, key_manager, 2)?;
+    invalidate_session(&mut *port, key_manager, 3)?;
     expect_session_inactive(&mut *port)?;
 
     let key_manager = authenticate(&mut *port, "KeyManagerExpiry", 0x06, b"KEYMG")?;
@@ -81,7 +108,7 @@ fn main() -> Result<(), DynError> {
     let _port = reset_to_factory(&config, port)?;
 
     println!(
-        "All developer-mode authentication and session probes passed on {}",
+        "All developer-mode authentication, session, and crypto probes passed on {}",
         config.port_name
     );
     Ok(())
@@ -184,7 +211,7 @@ fn probe_public_catalog(port: &mut dyn serialport::SerialPort) -> Result<(), Dyn
     expect_payload(
         &response,
         StatusCode::Success,
-        &[0x08, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+        &[0x0a, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0a, 0x0b],
     )?;
     let restricted = exchange(
         port,
@@ -194,7 +221,16 @@ fn probe_public_catalog(port: &mut dyn serialport::SerialPort) -> Result<(), Dyn
     expect_payload(
         &restricted,
         StatusCode::Success,
-        &[0x0b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x88, 0x8e, 0x8f],
+        &[0x0d, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0a, 0x0b, 0x88, 0x8e, 0x8f],
+    )
+}
+
+fn probe_crypto_capabilities(port: &mut dyn serialport::SerialPort) -> Result<(), DynError> {
+    let response = exchange(port, "GetCryptoCapabilities", &request(0x0a, 0x00, &[]))?;
+    expect_payload(
+        &response,
+        StatusCode::Success,
+        &[0x01, 0x0f, 0x01, 0x03, 0x80, 0x00, 0x40, 0x00, 0x40, 0x01],
     )
 }
 
@@ -326,9 +362,10 @@ fn put_persistent_key(
     session_id: [u8; 4],
     counter: u32,
     key_id: u8,
+    algorithm: u8,
     material: &[u8],
 ) -> Result<(), DynError> {
-    let mut inner = vec![key_id, 0x01, 0x01, 0x01, 0x01, u8::try_from(material.len())?];
+    let mut inner = vec![key_id, algorithm, 0x01, if algorithm == 0x03 { USAGE_WRAP_IMPORT } else { 0x01 }, 0x01, u8::try_from(material.len())?];
     inner.extend_from_slice(material);
     let response = exchange(
         port,
@@ -338,6 +375,118 @@ fn put_persistent_key(
     expect_status(&response, StatusCode::Success)?;
     settle_after_flash_mutation();
     Ok(())
+}
+
+fn sign_and_verify(
+    port: &mut dyn serialport::SerialPort,
+    session_id: [u8; 4],
+    sign_counter: u32,
+    verify_counter: u32,
+    key_id: u8,
+    message: &[u8],
+) -> Result<(), DynError> {
+    let mut inner = vec![
+        key_id,
+        KeyAlgorithm::Ed25519 as u8,
+        u8::try_from(message.len() & 0xff)?,
+        u8::try_from((message.len() >> 8) & 0xff)?,
+    ];
+    inner.extend_from_slice(message);
+    let sign = exchange(
+        port,
+        "SignDetached",
+        &request(0x90, 0x02, &authorized_payload(session_id, sign_counter, &inner)),
+    )?;
+    expect_status(&sign, StatusCode::Success)?;
+    let signature_len = usize::from(u16::from_le_bytes([sign.payload[0], sign.payload[1]]));
+    let signature = &sign.payload[2..2 + signature_len];
+    let public_key = ed25519_public_key_from_seed(&ED25519_SEED).ok_or("failed to derive public key")?;
+    let verify = verify_detached(port, "VerifyDetachedTrue", message, &public_key, signature)?;
+    expect_payload(&verify, StatusCode::Success, &[0x01])?;
+    let mut bad_signature = signature.to_vec();
+    if let Some(byte) = bad_signature.first_mut() {
+        *byte ^= 0x55;
+    }
+    let verify_false =
+        verify_detached(port, "VerifyDetachedFalse", message, &public_key, &bad_signature)?;
+    expect_payload(&verify_false, StatusCode::Success, &[0x00])?;
+    let _ = verify_counter;
+    Ok(())
+}
+
+fn verify_detached(
+    port: &mut dyn serialport::SerialPort,
+    name: &str,
+    message: &[u8],
+    public_key: &[u8],
+    signature: &[u8],
+) -> Result<ProtocolFrame, DynError> {
+    let mut payload = vec![
+        KeyAlgorithm::Ed25519 as u8,
+        u8::try_from(message.len() & 0xff)?,
+        u8::try_from((message.len() >> 8) & 0xff)?,
+    ];
+    payload.extend_from_slice(message);
+    payload.push(u8::try_from(public_key.len())?);
+    payload.extend_from_slice(public_key);
+    payload.extend_from_slice(&u16::try_from(signature.len())?.to_le_bytes());
+    payload.extend_from_slice(signature);
+    exchange(port, name, &request(0x0b, 0x00, &payload))
+}
+
+fn generate_random(
+    port: &mut dyn serialport::SerialPort,
+    session_id: [u8; 4],
+    counter: u32,
+    requested_len: u8,
+) -> Result<(), DynError> {
+    let response = exchange(
+        port,
+        "GenerateRandom",
+        &request(0x91, 0x02, &authorized_payload(session_id, counter, &[requested_len])),
+    )?;
+    expect_status(&response, StatusCode::Success)?;
+    if response.payload.first().copied() != Some(requested_len) {
+        return Err("random length mismatch".into());
+    }
+    Ok(())
+}
+
+fn import_wrapped_key(
+    port: &mut dyn serialport::SerialPort,
+    session_id: [u8; 4],
+    counter: u32,
+    wrapping_key_id: u8,
+    plaintext: &[u8],
+) -> Result<(), DynError> {
+    let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&WRAP_KEY));
+    let nonce_bytes = *b"wrapnonce001";
+    let mut ciphertext = plaintext.to_vec();
+    let tag = cipher
+        .encrypt_in_place_detached(
+            GenericArray::from_slice(&nonce_bytes),
+            b"rp_hsm.wrap.v1",
+            &mut ciphertext,
+        )
+        .map_err(|_| "failed to wrap import payload")?;
+    let mut inner = vec![
+        0x01,
+        wrapping_key_id,
+        KeyAlgorithm::Ed25519 as u8,
+        0x01,
+        0x01,
+    ];
+    inner.extend_from_slice(&u16::try_from(ciphertext.len())?.to_le_bytes());
+    inner.extend_from_slice(&ciphertext);
+    inner.push(28);
+    inner.extend_from_slice(&nonce_bytes);
+    inner.extend_from_slice(tag.as_slice());
+    let response = exchange(
+        port,
+        "ImportWrappedKey",
+        &request(0x92, 0x02, &authorized_payload(session_id, counter, &inner)),
+    )?;
+    expect_status(&response, StatusCode::Success)
 }
 
 fn list_persistent_keys(

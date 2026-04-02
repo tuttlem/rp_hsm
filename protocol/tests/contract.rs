@@ -20,3 +20,7 @@ mod key_store_recovery_vectors;
 mod auth_command_vectors;
 #[path = "contract/auth_redaction_vectors.rs"]
 mod auth_redaction_vectors;
+#[path = "contract/crypto_command_vectors.rs"]
+mod crypto_command_vectors;
+#[path = "contract/crypto_redaction_vectors.rs"]
+mod crypto_redaction_vectors;

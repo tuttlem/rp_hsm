@@ -2,7 +2,7 @@ use heapless::Vec;
 
 pub const PROTOCOL_VERSION: u8 = 1;
 pub const HEADER_LEN: usize = 6;
-pub const MAX_PAYLOAD_LEN: usize = 48;
+pub const MAX_PAYLOAD_LEN: usize = 240;
 pub const MAX_FRAME_LEN: usize = HEADER_LEN + MAX_PAYLOAD_LEN;
 
 pub const FLAG_RESPONSE_REQUIRED: u8 = 0x01;

@@ -1,16 +1,24 @@
 use heapless::Vec;
+use chacha20poly1305::{
+    ChaCha20Poly1305, KeyInit,
+    aead::{AeadInPlace, generic_array::GenericArray},
+};
+use ed25519_dalek::{Signer, Verifier};
+use p256::ecdsa::{Signature as P256Signature, VerifyingKey as P256VerifyingKey};
 
 use super::codec::{
     DecodeError, StatusCode, clear_bytes, decode_authentication_role,
     decode_authorized_payload, decode_complete_authentication_request, decode_frame,
-    decode_key_id_request, decode_key_marker_request, decode_put_persistent_key_request,
-    decode_transition_request, encode_auth_challenge_payload, encode_auth_session_payload,
-    encode_developer_reset_payload, encode_device_status_payload,
-    encode_key_destroy_payload, encode_key_list_payload, encode_key_metadata_payload,
-    encode_key_record_result_payload, encode_key_store_status_payload,
-    encode_lifecycle_status_payload, encode_lock_result_payload,
-    encode_recovery_result_payload, encode_session_status_payload, encode_state_revision_payload,
-    encode_transition_result_payload, encode_zeroize_payload, protocol_version_response,
+    decode_import_wrapped_key_request, decode_key_id_request, decode_key_marker_request,
+    decode_put_persistent_key_request, decode_random_request, decode_sign_request,
+    decode_transition_request, decode_verify_request, encode_auth_challenge_payload,
+    encode_auth_session_payload, encode_crypto_capabilities_payload,
+    encode_developer_reset_payload, encode_device_status_payload, encode_key_destroy_payload,
+    encode_key_list_payload, encode_key_metadata_payload, encode_key_record_result_payload,
+    encode_key_store_status_payload, encode_lifecycle_status_payload, encode_lock_result_payload,
+    encode_random_payload, encode_recovery_result_payload, encode_session_status_payload,
+    encode_signature_payload, encode_state_revision_payload, encode_transition_result_payload,
+    encode_verify_result_payload, encode_zeroize_payload, protocol_version_response,
     status_response,
 };
 use super::command::{CommandId, get_visible_catalog, lookup_command};
@@ -18,10 +26,11 @@ use super::frame::{
     FLAG_INCLUDE_RESTRICTED, FLAG_REPLAY_SENSITIVE, MessageKind, PROTOCOL_VERSION, ProtocolFrame,
 };
 use super::state::{
-    AuthSnapshot, AuthenticationChallenge, AuthorityRole, DeviceState, PersistentKeyStore,
-    ProvisioningRecord, ProvisioningSnapshot, SessionRecord, SessionState, SessionTracker,
-    SessionLifecycleState, clear_active_session, clear_auth_failures, clear_challenge,
-    clear_failure_counters, current_session_state, current_session_status,
+    AuthSnapshot, AuthenticationChallenge, AuthorityRole, CryptoPersistentState,
+    CryptoRuntimeState, DeviceState, KeyAlgorithm, PersistentKeyStore, ProvisioningRecord,
+    ProvisioningSnapshot, SessionLifecycleState, SessionRecord, SessionState, SessionTracker,
+    USAGE_SIGN, USAGE_WRAP_IMPORT, clear_active_session, clear_auth_failures, clear_challenge,
+    clear_failure_counters, clear_secret_array, current_session_state, current_session_status,
     developer_mode_session, developer_reset_marker, enforce_replay_policy,
     ensure_command_allowed, expect_marker_bytes, expect_single_marker, finalize_marker,
     find_credential, fingerprint_frame, issue_challenge_nonce, reactivate_marker,
@@ -56,6 +65,7 @@ pub struct ProtocolEngine {
     record: ProvisioningRecord,
     key_store: PersistentKeyStore,
     auth_snapshot: AuthSnapshot,
+    crypto_state: CryptoRuntimeState,
     active_challenge: Option<AuthenticationChallenge>,
     active_session: Option<SessionRecord>,
     session_state: SessionState,
@@ -74,6 +84,7 @@ impl ProtocolEngine {
             key_store: PersistentKeyStore::new(record.revision_counter()),
             record,
             auth_snapshot: AuthSnapshot::default(),
+            crypto_state: CryptoRuntimeState::default(),
             active_challenge: None,
             active_session: None,
             session_state,
@@ -156,6 +167,11 @@ impl ProtocolEngine {
         &self.auth_snapshot
     }
 
+    #[must_use]
+    pub fn crypto_persistent_state(&self) -> CryptoPersistentState {
+        self.crypto_state.persistent_state()
+    }
+
     pub fn restore_provisioning_snapshot(&mut self, snapshot: ProvisioningSnapshot) {
         self.record.restore_snapshot(snapshot);
     }
@@ -173,6 +189,18 @@ impl ProtocolEngine {
         clear_active_session(&mut self.active_session);
         self.legacy_session_mode = false;
         self.refresh_session_state();
+    }
+
+    pub fn restore_crypto_persistent_state(&mut self, snapshot: CryptoPersistentState) {
+        self.crypto_state.restore_persistent_state(snapshot);
+    }
+
+    pub fn seed_rng(&mut self, seed: [u8; 32]) {
+        self.crypto_state.seed_rng(seed);
+    }
+
+    pub fn set_rng_health(&mut self, healthy: bool) {
+        self.crypto_state.set_rng_health(healthy);
     }
 
     #[must_use]
@@ -292,6 +320,51 @@ impl ProtocolEngine {
         Ok((request_counter, owned))
     }
 
+    fn authorize_any_owned<const N: usize>(
+        &mut self,
+        roles: &[AuthorityRole],
+        payload: &[u8],
+        min_inner_len: usize,
+        max_inner_len: usize,
+    ) -> Result<(u32, Vec<u8, N>, AuthorityRole), StatusCode> {
+        if self.active_session.is_none() {
+            for &role in roles {
+                if self.legacy_role_active(role) {
+                    if payload.len() < min_inner_len || payload.len() > max_inner_len {
+                        return Err(StatusCode::ValidationError);
+                    }
+                    let mut owned = Vec::<u8, N>::new();
+                    owned
+                        .extend_from_slice(payload)
+                        .map_err(|()| StatusCode::ValidationError)?;
+                    return Ok((0, owned, role));
+                }
+            }
+        }
+
+        let (session_id, request_counter, inner) =
+            decode_authorized_payload(payload, min_inner_len, max_inner_len)?;
+        let Some(session) = self.active_session.as_mut() else {
+            return Err(StatusCode::AuthorizationError);
+        };
+        if session.state != SessionLifecycleState::Active
+            || session.session_id != session_id
+            || !roles.contains(&session.role)
+        {
+            return Err(StatusCode::AuthorizationError);
+        }
+        if request_counter <= session.last_counter {
+            return Err(StatusCode::ReplayError);
+        }
+        session.last_counter = request_counter;
+        session.last_activity_tick = self.request_tick;
+        let mut owned = Vec::<u8, N>::new();
+        owned
+            .extend_from_slice(inner)
+            .map_err(|()| StatusCode::ValidationError)?;
+        Ok((request_counter, owned, session.role))
+    }
+
     fn handle_frame(&mut self, frame: &mut ProtocolFrame) -> ProtocolFrame {
         self.advance_request_tick();
         self.key_store
@@ -353,6 +426,8 @@ impl ProtocolEngine {
             Some(CommandId::CompleteAuthentication) => self.handle_complete_authentication(frame),
             Some(CommandId::GetSessionStatus) => self.handle_get_session_status(),
             Some(CommandId::InvalidateSession) => self.handle_invalidate_session(frame),
+            Some(CommandId::GetCryptoCapabilities) => self.handle_get_crypto_capabilities(),
+            Some(CommandId::VerifyDetached) => Self::handle_verify_detached(frame),
             Some(CommandId::BeginProvisioning) => self.handle_begin_provisioning(frame),
             Some(CommandId::FinalizeProvisioning) => self.handle_finalize_provisioning(frame),
             Some(CommandId::LockDevice) => self.handle_lock_device(frame),
@@ -371,6 +446,17 @@ impl ProtocolEngine {
             Some(CommandId::DestroyPersistentKey) => self.handle_destroy_persistent_key(frame),
             Some(CommandId::DeveloperStoreFault) => self.handle_developer_store_fault(frame),
             Some(CommandId::DeveloperReboot) => self.handle_developer_reboot(frame),
+            Some(CommandId::SignDetached) => self.handle_sign_detached(frame),
+            Some(CommandId::GenerateRandom) => self.handle_generate_random(frame),
+            Some(CommandId::ImportWrappedKey) => self.handle_import_wrapped_key(frame),
+            Some(
+                CommandId::ExportWrappedKey
+                | CommandId::Encrypt
+                | CommandId::Decrypt
+                | CommandId::DeriveSharedSecret,
+            ) => {
+                status_response(StatusCode::CommandError, &[])
+            }
             None => status_response(StatusCode::CommandError, &[]),
         }
     }
@@ -412,6 +498,11 @@ impl ProtocolEngine {
 
     fn handle_get_key_store_status(&self) -> ProtocolFrame {
         let payload = encode_key_store_status_payload(self.key_store.status());
+        status_response(StatusCode::Success, &payload)
+    }
+
+    fn handle_get_crypto_capabilities(&self) -> ProtocolFrame {
+        let payload = encode_crypto_capabilities_payload(self.crypto_state.capabilities());
         status_response(StatusCode::Success, &payload)
     }
 
@@ -745,11 +836,11 @@ impl ProtocolEngine {
     }
 
     fn handle_put_persistent_key(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
-        let (_, inner) = match self.authorize_privileged_owned::<30>(
+        let (_, inner) = match self.authorize_privileged_owned::<38>(
             AuthorityRole::KeyManager,
             frame.payload.as_slice(),
             7,
-            30,
+            38,
         ) {
             Ok(values) => values,
             Err(status) => return status_response(status, &[]),
@@ -852,6 +943,192 @@ impl ProtocolEngine {
         match self.key_store.destroy_key(key_id) {
             Ok(result) => {
                 let payload = encode_key_destroy_payload(result);
+                status_response(StatusCode::Success, &payload)
+            }
+            Err(status) => status_response(status, &[]),
+        }
+    }
+
+    fn handle_sign_detached(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        let (_, mut inner) = match self.authorize_privileged_owned::<140>(
+            AuthorityRole::KeyManager,
+            frame.payload.as_slice(),
+            5,
+            132,
+        ) {
+            Ok(values) => values,
+            Err(status) => return status_response(status, &[]),
+        };
+        let request = match decode_sign_request(inner.as_slice()) {
+            Ok(request) => request,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        if request.algorithm != KeyAlgorithm::Ed25519 {
+            clear_bytes(inner.as_mut_slice());
+            return status_response(StatusCode::AuthorizationError, &[]);
+        }
+
+        let mut key_bytes = match self
+            .key_store
+            .export_key_material_for_operation(request.key_id, KeyAlgorithm::Ed25519, USAGE_SIGN, false)
+        {
+            Ok(material) => material,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
+        let signature = signing_key.sign(request.message.as_slice()).to_bytes();
+        let response = match encode_signature_payload(&signature) {
+            Some(payload) => status_response(StatusCode::Success, &payload),
+            None => status_response(StatusCode::InternalError, &[]),
+        };
+        clear_secret_array(&mut key_bytes);
+        clear_bytes(inner.as_mut_slice());
+        response
+    }
+
+    fn handle_verify_detached(frame: &ProtocolFrame) -> ProtocolFrame {
+        let request = match decode_verify_request(frame.payload.as_slice()) {
+            Ok(request) => request,
+            Err(status) => return status_response(status, &[]),
+        };
+        let verified = match request.algorithm {
+            KeyAlgorithm::Ed25519 => {
+                if request.public_key.len() != 32 || request.signature.len() != 64 {
+                    return status_response(StatusCode::ValidationError, &[]);
+                }
+                let Ok(verifying_key) = ed25519_dalek::VerifyingKey::from_bytes(
+                    request.public_key.as_slice().try_into().unwrap_or(&[0; 32]),
+                ) else {
+                    return status_response(StatusCode::ValidationError, &[]);
+                };
+                let Ok(signature) = ed25519_dalek::Signature::from_slice(request.signature.as_slice()) else {
+                    return status_response(StatusCode::ValidationError, &[]);
+                };
+                verifying_key.verify(request.message.as_slice(), &signature).is_ok()
+            }
+            KeyAlgorithm::P256 => {
+                if request.public_key.len() != 33 || request.signature.len() != 64 {
+                    return status_response(StatusCode::ValidationError, &[]);
+                }
+                let Ok(verifying_key) =
+                    P256VerifyingKey::from_sec1_bytes(request.public_key.as_slice())
+                else {
+                    return status_response(StatusCode::ValidationError, &[]);
+                };
+                let Ok(signature) = P256Signature::from_slice(request.signature.as_slice()) else {
+                    return status_response(StatusCode::ValidationError, &[]);
+                };
+                verifying_key.verify(request.message.as_slice(), &signature).is_ok()
+            }
+            KeyAlgorithm::Aes256 => return status_response(StatusCode::AuthorizationError, &[]),
+        };
+        let payload = encode_verify_result_payload(verified);
+        status_response(StatusCode::Success, &payload)
+    }
+
+    fn handle_generate_random(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        let (_, inner, _) = match self.authorize_any_owned::<1>(
+            &[AuthorityRole::Administrator, AuthorityRole::KeyManager],
+            frame.payload.as_slice(),
+            1,
+            1,
+        ) {
+            Ok(values) => values,
+            Err(status) => return status_response(status, &[]),
+        };
+        let request = match decode_random_request(inner.as_slice()) {
+            Ok(request) => request,
+            Err(status) => return status_response(status, &[]),
+        };
+        match self
+            .crypto_state
+            .generate_random_bytes(usize::from(request.requested_len))
+        {
+            Ok(bytes) => match encode_random_payload(bytes.as_slice()) {
+                Some(payload) => status_response(StatusCode::Success, &payload),
+                None => status_response(StatusCode::InternalError, &[]),
+            },
+            Err(StatusCode::StateError) => status_response(StatusCode::InternalError, &[]),
+            Err(status) => status_response(status, &[]),
+        }
+    }
+
+    fn handle_import_wrapped_key(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        let (_, mut inner) = match self.authorize_privileged_owned::<96>(
+            AuthorityRole::KeyManager,
+            frame.payload.as_slice(),
+            8,
+            73,
+        ) {
+            Ok(values) => values,
+            Err(status) => return status_response(status, &[]),
+        };
+        let request = match decode_import_wrapped_key_request(inner.as_slice()) {
+            Ok(request) => request,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        if request.wrap_format_version != 0x01
+            || request.target_algorithm != KeyAlgorithm::Ed25519
+            || request.target_export_policy != super::state::ExportPolicy::NonExportable
+            || request.target_usage_mask == 0
+        {
+            clear_bytes(inner.as_mut_slice());
+            return status_response(StatusCode::AuthorizationError, &[]);
+        }
+        let mut wrapping_key = match self.key_store.export_key_material_for_operation(
+            request.wrapping_key_id,
+            KeyAlgorithm::Aes256,
+            USAGE_WRAP_IMPORT,
+            false,
+        ) {
+            Ok(material) => material,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        if request.integrity_tag.len() != 28 {
+            clear_secret_array(&mut wrapping_key);
+            clear_bytes(inner.as_mut_slice());
+            return status_response(StatusCode::ValidationError, &[]);
+        }
+        let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&wrapping_key));
+        let nonce = GenericArray::from_slice(&request.integrity_tag.as_slice()[..12]);
+        let mut buffer = [0u8; 32];
+        let ciphertext_len = request.ciphertext.len();
+        buffer[..ciphertext_len].copy_from_slice(request.ciphertext.as_slice());
+        let tag = chacha20poly1305::Tag::clone_from_slice(&request.integrity_tag.as_slice()[12..]);
+        if cipher
+            .decrypt_in_place_detached(nonce, b"rp_hsm.wrap.v1", &mut buffer[..ciphertext_len], &tag)
+            .is_err()
+        {
+            clear_secret_array(&mut wrapping_key);
+            clear_secret_array(&mut buffer);
+            clear_bytes(inner.as_mut_slice());
+            return status_response(StatusCode::AuthorizationError, &[]);
+        }
+        let import_result = self.key_store.import_wrapped_key(
+            request.target_algorithm,
+            request.target_usage_mask,
+            request.target_export_policy,
+            &buffer[..ciphertext_len],
+        );
+        clear_secret_array(&mut wrapping_key);
+        clear_secret_array(&mut buffer);
+        clear_bytes(inner.as_mut_slice());
+        match import_result {
+            Ok(result) => {
+                self.crypto_state.note_wrapped_import(result.store_revision);
+                let payload = encode_key_record_result_payload(result);
                 status_response(StatusCode::Success, &payload)
             }
             Err(status) => status_response(status, &[]),

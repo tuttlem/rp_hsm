@@ -10,6 +10,7 @@ pub enum CommandFamily {
     Authentication,
     Lifecycle,
     KeyStore,
+    Crypto,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,6 +25,8 @@ pub enum CommandId {
     CompleteAuthentication = 0x07,
     GetSessionStatus = 0x08,
     InvalidateSession = 0x09,
+    GetCryptoCapabilities = 0x0a,
+    VerifyDetached = 0x0b,
     BeginProvisioning = 0x80,
     FinalizeProvisioning = 0x81,
     LockDevice = 0x82,
@@ -40,6 +43,13 @@ pub enum CommandId {
     DestroyPersistentKey = 0x8d,
     DeveloperStoreFault = 0x8e,
     DeveloperReboot = 0x8f,
+    SignDetached = 0x90,
+    GenerateRandom = 0x91,
+    ImportWrappedKey = 0x92,
+    ExportWrappedKey = 0x93,
+    Encrypt = 0x94,
+    Decrypt = 0x95,
+    DeriveSharedSecret = 0x96,
 }
 
 impl CommandId {
@@ -55,6 +65,8 @@ impl CommandId {
             0x07 => Some(Self::CompleteAuthentication),
             0x08 => Some(Self::GetSessionStatus),
             0x09 => Some(Self::InvalidateSession),
+            0x0a => Some(Self::GetCryptoCapabilities),
+            0x0b => Some(Self::VerifyDetached),
             0x80 => Some(Self::BeginProvisioning),
             0x81 => Some(Self::FinalizeProvisioning),
             0x82 => Some(Self::LockDevice),
@@ -71,6 +83,13 @@ impl CommandId {
             0x8d => Some(Self::DestroyPersistentKey),
             0x8e => Some(Self::DeveloperStoreFault),
             0x8f => Some(Self::DeveloperReboot),
+            0x90 => Some(Self::SignDetached),
+            0x91 => Some(Self::GenerateRandom),
+            0x92 => Some(Self::ImportWrappedKey),
+            0x93 => Some(Self::ExportWrappedKey),
+            0x94 => Some(Self::Encrypt),
+            0x95 => Some(Self::Decrypt),
+            0x96 => Some(Self::DeriveSharedSecret),
             _ => None,
         }
     }
@@ -244,6 +263,32 @@ pub const INVALIDATE_SESSION: CommandDefinition = CommandDefinition {
     developer_only: false,
 };
 
+pub const GET_CRYPTO_CAPABILITIES: CommandDefinition = CommandDefinition {
+    id: CommandId::GetCryptoCapabilities,
+    family: CommandFamily::Crypto,
+    min_payload_len: 0,
+    max_payload_len: 0,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Public,
+    replay_policy: ReplayPolicy::Repeatable,
+    idempotency_policy: IdempotencyPolicy::Idempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const VERIFY_DETACHED: CommandDefinition = CommandDefinition {
+    id: CommandId::VerifyDetached,
+    family: CommandFamily::Crypto,
+    min_payload_len: 1 + 2 + 1 + 1 + 2 + 1,
+    max_payload_len: 231,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Public,
+    replay_policy: ReplayPolicy::Repeatable,
+    idempotency_policy: IdempotencyPolicy::Idempotent,
+    enabled: true,
+    developer_only: false,
+};
+
 pub const BEGIN_PROVISIONING: CommandDefinition = CommandDefinition {
     id: CommandId::BeginProvisioning,
     family: CommandFamily::Lifecycle,
@@ -365,7 +410,7 @@ pub const PUT_PERSISTENT_KEY: CommandDefinition = CommandDefinition {
     id: CommandId::PutPersistentKey,
     family: CommandFamily::KeyStore,
     min_payload_len: AUTH_HEADER_LEN + 7,
-    max_payload_len: AUTH_HEADER_LEN + 30,
+    max_payload_len: AUTH_HEADER_LEN + 38,
     allowed_device_states: OPERATIONAL_ONLY,
     required_role: AuthorityRole::KeyManager,
     replay_policy: ReplayPolicy::SingleUse,
@@ -452,6 +497,97 @@ pub const DEVELOPER_REBOOT: CommandDefinition = CommandDefinition {
     developer_only: true,
 };
 
+pub const SIGN_DETACHED: CommandDefinition = CommandDefinition {
+    id: CommandId::SignDetached,
+    family: CommandFamily::Crypto,
+    min_payload_len: AUTH_HEADER_LEN + 1 + 1 + 2 + 1,
+    max_payload_len: AUTH_HEADER_LEN + 1 + 1 + 2 + 128,
+    allowed_device_states: OPERATIONAL_ONLY,
+    required_role: AuthorityRole::KeyManager,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const GENERATE_RANDOM: CommandDefinition = CommandDefinition {
+    id: CommandId::GenerateRandom,
+    family: CommandFamily::Crypto,
+    min_payload_len: AUTH_HEADER_LEN + 1,
+    max_payload_len: AUTH_HEADER_LEN + 1,
+    allowed_device_states: OPERATIONAL_ONLY,
+    required_role: AuthorityRole::Public,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const IMPORT_WRAPPED_KEY: CommandDefinition = CommandDefinition {
+    id: CommandId::ImportWrappedKey,
+    family: CommandFamily::Crypto,
+    min_payload_len: AUTH_HEADER_LEN + 1 + 1 + 1 + 1 + 1 + 2 + 1 + 1,
+    max_payload_len: AUTH_HEADER_LEN + 73,
+    allowed_device_states: OPERATIONAL_ONLY,
+    required_role: AuthorityRole::KeyManager,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const EXPORT_WRAPPED_KEY: CommandDefinition = CommandDefinition {
+    id: CommandId::ExportWrappedKey,
+    family: CommandFamily::Crypto,
+    min_payload_len: AUTH_HEADER_LEN,
+    max_payload_len: AUTH_HEADER_LEN,
+    allowed_device_states: OPERATIONAL_ONLY,
+    required_role: AuthorityRole::KeyManager,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: false,
+    developer_only: false,
+};
+
+pub const ENCRYPT: CommandDefinition = CommandDefinition {
+    id: CommandId::Encrypt,
+    family: CommandFamily::Crypto,
+    min_payload_len: AUTH_HEADER_LEN,
+    max_payload_len: AUTH_HEADER_LEN,
+    allowed_device_states: OPERATIONAL_ONLY,
+    required_role: AuthorityRole::KeyManager,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: false,
+    developer_only: false,
+};
+
+pub const DECRYPT: CommandDefinition = CommandDefinition {
+    id: CommandId::Decrypt,
+    family: CommandFamily::Crypto,
+    min_payload_len: AUTH_HEADER_LEN,
+    max_payload_len: AUTH_HEADER_LEN,
+    allowed_device_states: OPERATIONAL_ONLY,
+    required_role: AuthorityRole::KeyManager,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: false,
+    developer_only: false,
+};
+
+pub const DERIVE_SHARED_SECRET: CommandDefinition = CommandDefinition {
+    id: CommandId::DeriveSharedSecret,
+    family: CommandFamily::Crypto,
+    min_payload_len: AUTH_HEADER_LEN,
+    max_payload_len: AUTH_HEADER_LEN,
+    allowed_device_states: OPERATIONAL_ONLY,
+    required_role: AuthorityRole::KeyManager,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: false,
+    developer_only: false,
+};
+
 pub const PUBLIC_COMMANDS: &[CommandDefinition] = &[
     GET_PROTOCOL_VERSION,
     GET_DEVICE_STATUS,
@@ -461,6 +597,8 @@ pub const PUBLIC_COMMANDS: &[CommandDefinition] = &[
     BEGIN_AUTHENTICATION,
     COMPLETE_AUTHENTICATION,
     GET_SESSION_STATUS,
+    GET_CRYPTO_CAPABILITIES,
+    VERIFY_DETACHED,
 ];
 
 pub fn lookup_command(id: u8) -> Option<CommandDefinition> {
@@ -479,6 +617,8 @@ pub fn definition_for(id: CommandId) -> CommandDefinition {
         CommandId::CompleteAuthentication => COMPLETE_AUTHENTICATION,
         CommandId::GetSessionStatus => GET_SESSION_STATUS,
         CommandId::InvalidateSession => INVALIDATE_SESSION,
+        CommandId::GetCryptoCapabilities => GET_CRYPTO_CAPABILITIES,
+        CommandId::VerifyDetached => VERIFY_DETACHED,
         CommandId::BeginProvisioning => BEGIN_PROVISIONING,
         CommandId::FinalizeProvisioning => FINALIZE_PROVISIONING,
         CommandId::LockDevice => LOCK_DEVICE,
@@ -495,6 +635,13 @@ pub fn definition_for(id: CommandId) -> CommandDefinition {
         CommandId::DestroyPersistentKey => DESTROY_PERSISTENT_KEY,
         CommandId::DeveloperStoreFault => DEVELOPER_STORE_FAULT,
         CommandId::DeveloperReboot => DEVELOPER_REBOOT,
+        CommandId::SignDetached => SIGN_DETACHED,
+        CommandId::GenerateRandom => GENERATE_RANDOM,
+        CommandId::ImportWrappedKey => IMPORT_WRAPPED_KEY,
+        CommandId::ExportWrappedKey => EXPORT_WRAPPED_KEY,
+        CommandId::Encrypt => ENCRYPT,
+        CommandId::Decrypt => DECRYPT,
+        CommandId::DeriveSharedSecret => DERIVE_SHARED_SECRET,
     }
 }
 
@@ -528,6 +675,8 @@ pub fn get_visible_catalog(
             BEGIN_AUTHENTICATION,
             COMPLETE_AUTHENTICATION,
             GET_SESSION_STATUS,
+            GET_CRYPTO_CAPABILITIES,
+            VERIFY_DETACHED,
             INVALIDATE_SESSION,
             BEGIN_PROVISIONING,
             FINALIZE_PROVISIONING,
@@ -541,10 +690,13 @@ pub fn get_visible_catalog(
             BEGIN_AUTHENTICATION,
             COMPLETE_AUTHENTICATION,
             GET_SESSION_STATUS,
+            GET_CRYPTO_CAPABILITIES,
+            VERIFY_DETACHED,
             INVALIDATE_SESSION,
             LOCK_DEVICE,
             UNLOCK_DEVICE,
             EXECUTE_ZEROIZE,
+            GENERATE_RANDOM,
         ]),
         SessionState::Recovery => public_and(&[
             GET_PROTOCOL_VERSION,
@@ -555,6 +707,8 @@ pub fn get_visible_catalog(
             BEGIN_AUTHENTICATION,
             COMPLETE_AUTHENTICATION,
             GET_SESSION_STATUS,
+            GET_CRYPTO_CAPABILITIES,
+            VERIFY_DETACHED,
             INVALIDATE_SESSION,
             ENTER_RECOVERY,
             RECOVER_TO_PROVISIONED,
@@ -571,6 +725,8 @@ pub fn get_visible_catalog(
                     BEGIN_AUTHENTICATION,
                     COMPLETE_AUTHENTICATION,
                     GET_SESSION_STATUS,
+                    GET_CRYPTO_CAPABILITIES,
+                    VERIFY_DETACHED,
                     DEVELOPER_RESET_LIFECYCLE,
                     DEVELOPER_STORE_FAULT,
                     DEVELOPER_REBOOT,
@@ -588,12 +744,17 @@ pub fn get_visible_catalog(
             BEGIN_AUTHENTICATION,
             COMPLETE_AUTHENTICATION,
             GET_SESSION_STATUS,
+            GET_CRYPTO_CAPABILITIES,
+            VERIFY_DETACHED,
             INVALIDATE_SESSION,
             PUT_PERSISTENT_KEY,
             LIST_PERSISTENT_KEYS,
             GET_KEY_METADATA,
             REVOKE_PERSISTENT_KEY,
             DESTROY_PERSISTENT_KEY,
+            SIGN_DETACHED,
+            GENERATE_RANDOM,
+            IMPORT_WRAPPED_KEY,
         ]),
     }
 }

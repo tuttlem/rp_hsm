@@ -107,12 +107,13 @@ The probe expects a `developer-mode` firmware image and validates:
 2. developer-mode restricted catalog visibility for `DeveloperResetLifecycle`, `DeveloperStoreFault`, and `DeveloperReboot`
 3. unauthenticated denial of privileged commands
 4. bootstrap authentication and provisioning from `factory` to `operational`
-5. administrator authentication, lock, unlock, and immediate session invalidation
-6. key-manager authentication, persistent key operations, replay denial, and explicit logout
-7. session expiry after bounded inactivity
-8. repeated failed authentication attempts triggering lockout
-9. reboot-driven invalidation of active authenticated sessions
-10. developer-only lifecycle reset back to `factory`
+5. public crypto capability discovery
+6. administrator authentication, lock, unlock, bounded random generation, and immediate session invalidation
+7. key-manager authentication, managed signing, detached verification, wrapped import, persistent key operations, replay denial, and explicit logout
+8. session expiry after bounded inactivity
+9. repeated failed authentication attempts triggering lockout
+10. reboot-driven invalidation of active authenticated sessions
+11. developer-only lifecycle reset back to `factory`
 
 Important:
 
