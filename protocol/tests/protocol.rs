@@ -20,3 +20,19 @@ mod recovery_flow;
 mod zeroize_flow;
 #[path = "protocol/developer_reset.rs"]
 mod developer_reset;
+#[path = "protocol/key_store_fixtures.rs"]
+mod key_store_fixtures;
+#[path = "protocol/persistent_retention.rs"]
+mod persistent_retention;
+#[path = "protocol/journal_recovery.rs"]
+mod journal_recovery;
+#[path = "protocol/key_lifecycle.rs"]
+mod key_lifecycle;
+#[path = "protocol/key_policy_enforcement.rs"]
+mod key_policy_enforcement;
+#[path = "protocol/store_corruption.rs"]
+mod store_corruption;
+#[path = "protocol/rollback_detection.rs"]
+mod rollback_detection;
+#[path = "protocol/store_capacity.rs"]
+mod store_capacity;

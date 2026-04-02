@@ -5,8 +5,10 @@ use super::frame::{
     RESERVED_FLAG_MASK,
 };
 use super::state::{
-    DeveloperResetOutcome, DeviceState, LifecycleStatus, LockResult, RecoveryResult, SessionState,
-    StateRevision, TransitionResult, ZeroizeOutcome,
+    DeveloperResetOutcome, DeviceState, ExportPolicy, KeyAlgorithm, KeyDestroyResult,
+    KeyListEntry, KeyMaterialEnvelope, KeyMetadataView, KeyOrigin,
+    KeyRecordResult, KeyStoreStatus, LifecycleStatus, LockResult, PutPersistentKeyRequest,
+    RecoveryResult, SessionState, StateRevision, TransitionResult, ZeroizeOutcome,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,6 +135,17 @@ pub fn encode_lifecycle_status_payload(status: LifecycleStatus) -> [u8; 4] {
 }
 
 #[must_use]
+pub fn encode_key_store_status_payload(status: KeyStoreStatus) -> [u8; 5] {
+    [
+        status.store_state as u8,
+        status.key_count,
+        status.free_slots,
+        u8::from(status.rollback_detected),
+        u8::from(status.corruption_detected),
+    ]
+}
+
+#[must_use]
 pub fn encode_transition_result_payload(result: TransitionResult) -> [u8; 9] {
     let transition_id = result.transition_id.to_le_bytes();
     let revision = result.revision_counter.to_le_bytes();
@@ -192,6 +205,66 @@ pub fn encode_developer_reset_payload(result: DeveloperResetOutcome) -> [u8; 4] 
     ]
 }
 
+#[must_use]
+pub fn encode_key_record_result_payload(result: KeyRecordResult) -> [u8; 10] {
+    let record_revision = result.record_revision.to_le_bytes();
+    let store_revision = result.store_revision.to_le_bytes();
+    [
+        result.key_id,
+        result.lifecycle_state as u8,
+        record_revision[0],
+        record_revision[1],
+        record_revision[2],
+        record_revision[3],
+        store_revision[0],
+        store_revision[1],
+        store_revision[2],
+        store_revision[3],
+    ]
+}
+
+#[must_use]
+pub fn encode_key_metadata_payload(view: KeyMetadataView) -> [u8; 10] {
+    let record_revision = view.record_revision.to_le_bytes();
+    [
+        view.key_id,
+        view.algorithm as u8,
+        view.origin as u8,
+        view.usage_mask,
+        view.export_policy as u8,
+        view.lifecycle_state as u8,
+        record_revision[0],
+        record_revision[1],
+        record_revision[2],
+        record_revision[3],
+    ]
+}
+
+#[must_use]
+pub fn encode_key_destroy_payload(result: KeyDestroyResult) -> [u8; 4] {
+    [
+        result.key_id,
+        result.lifecycle_state as u8,
+        u8::from(result.material_cleared),
+        u8::from(result.tombstone_committed),
+    ]
+}
+
+#[must_use]
+pub fn encode_key_list_payload(entries: &[KeyListEntry]) -> Option<Vec<u8, MAX_PAYLOAD_LEN>> {
+    let mut payload = Vec::new();
+    let count = u8::try_from(entries.len()).ok()?;
+    payload.push(count).ok()?;
+    for entry in entries {
+        payload.push(entry.key_id).ok()?;
+        payload.push(entry.algorithm as u8).ok()?;
+        payload.push(entry.lifecycle_state as u8).ok()?;
+        payload.push(entry.usage_mask).ok()?;
+        payload.push(entry.export_policy as u8).ok()?;
+    }
+    Some(payload)
+}
+
 /// # Errors
 ///
 /// Returns `StatusCode::ValidationError` when the payload does not contain a
@@ -203,4 +276,55 @@ pub fn decode_transition_request(payload: &[u8], marker: u8) -> Result<u32, Stat
     Ok(u32::from_le_bytes([
         payload[0], payload[1], payload[2], payload[3],
     ]))
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the persistent-key payload is
+/// malformed or contains unsupported enum values.
+pub fn decode_put_persistent_key_request(payload: &[u8]) -> Result<PutPersistentKeyRequest, StatusCode> {
+    if payload.len() < 7 {
+        return Err(StatusCode::ValidationError);
+    }
+    let key_id = payload[0];
+    let algorithm = KeyAlgorithm::from_byte(payload[1]).ok_or(StatusCode::ValidationError)?;
+    let origin = KeyOrigin::from_byte(payload[2]).ok_or(StatusCode::ValidationError)?;
+    let usage_mask = payload[3];
+    let export_policy = ExportPolicy::from_byte(payload[4]).ok_or(StatusCode::ValidationError)?;
+    let material_len = usize::from(payload[5]);
+    if material_len == 0 || payload.len() != 6 + material_len {
+        return Err(StatusCode::ValidationError);
+    }
+    let material = KeyMaterialEnvelope::try_from_bytes(origin, &payload[6..])
+        .ok_or(StatusCode::ValidationError)?;
+    Ok(PutPersistentKeyRequest {
+        key_id,
+        algorithm,
+        origin,
+        usage_mask,
+        export_policy,
+        material,
+    })
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the payload does not contain the
+/// expected key identifier and marker.
+pub fn decode_key_marker_request(payload: &[u8], marker: &[u8]) -> Result<u8, StatusCode> {
+    if payload.len() != marker.len() + 1 || &payload[1..] != marker {
+        return Err(StatusCode::ValidationError);
+    }
+    Ok(payload[0])
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the payload does not contain a
+/// single key identifier byte.
+pub fn decode_key_id_request(payload: &[u8]) -> Result<u8, StatusCode> {
+    if payload.len() != 1 {
+        return Err(StatusCode::ValidationError);
+    }
+    Ok(payload[0])
 }

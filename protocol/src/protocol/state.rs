@@ -8,11 +8,16 @@ pub const MAX_OWNER_ID_LEN: usize = 16;
 pub const MAX_AUTH_SNAPSHOT_LEN: usize = 16;
 pub const ZEROIZE_COMPLETION_FLAGS: u8 = 0x0f;
 pub const DEVELOPER_RESET_COMPLETION_FLAGS: u8 = 0x07;
+pub const MAX_PERSISTENT_KEYS: usize = 8;
+pub const MAX_KEY_MATERIAL_LEN: usize = 24;
+pub const MAX_KEY_LIST_ENTRIES: usize = MAX_PERSISTENT_KEYS;
+pub const MAX_KEY_JOURNAL_RECORDS: usize = 24;
 
 const FINALIZE_MARKER: u8 = 0xa5;
 const REACTIVATE_MARKER: u8 = 0xa6;
 const UNLOCK_MARKER: u8 = 0x5a;
 const RECOVERY_MARKER: u8 = 0xc3;
+const REVOKE_MARKER: u8 = 0x52;
 const ZEROIZE_MARKER: [u8; 2] = [0xde, 0xad];
 const DEVELOPER_RESET_MARKER: [u8; 3] = [0x44, 0x45, 0x56];
 
@@ -65,6 +70,7 @@ pub enum AuthorityRole {
     Administrator = 0x03,
     Recovery = 0x04,
     Developer = 0x05,
+    KeyManager = 0x06,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,6 +145,18 @@ pub struct TransitionIntent {
     pub command_code: u8,
     pub authorization_snapshot: Vec<u8, MAX_AUTH_SNAPSHOT_LEN>,
     pub created_revision: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProvisioningSnapshot {
+    pub record_version: u8,
+    pub lifecycle_state: LifecycleState,
+    pub pending_transition: Option<TransitionIntent>,
+    pub owner_binding: OwnerBinding,
+    pub recovery_policy: RecoveryPolicy,
+    pub revision_counter: u32,
+    pub integrity_tag: u32,
+    pub next_transition_id: u32,
 }
 
 impl TransitionIntent {
@@ -247,6 +265,340 @@ pub struct RecoveryResult {
     pub recovery_required: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum KeyLifecycleState {
+    Pending = 0x01,
+    Active = 0x02,
+    Revoked = 0x03,
+    PendingDestroy = 0x04,
+    Destroyed = 0x05,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum KeyAlgorithm {
+    Ed25519 = 0x01,
+    P256 = 0x02,
+    Aes256 = 0x03,
+}
+
+impl KeyAlgorithm {
+    #[must_use]
+    pub fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0x01 => Some(Self::Ed25519),
+            0x02 => Some(Self::P256),
+            0x03 => Some(Self::Aes256),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum KeyOrigin {
+    Generated = 0x01,
+    Imported = 0x02,
+}
+
+impl KeyOrigin {
+    #[must_use]
+    pub fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0x01 => Some(Self::Generated),
+            0x02 => Some(Self::Imported),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ExportPolicy {
+    NonExportable = 0x01,
+    WrappedOnly = 0x02,
+}
+
+impl ExportPolicy {
+    #[must_use]
+    pub fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0x01 => Some(Self::NonExportable),
+            0x02 => Some(Self::WrappedOnly),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum MaterialEncoding {
+    Internal = 0x01,
+    WrappedImport = 0x02,
+    Destroyed = 0x03,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum KeyStoreState {
+    Empty = 0x01,
+    Ready = 0x02,
+    Degraded = 0x03,
+    RecoveryRequired = 0x04,
+    Full = 0x05,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyMetadata {
+    pub algorithm: KeyAlgorithm,
+    pub origin: KeyOrigin,
+    pub usage_mask: u8,
+    pub export_policy: ExportPolicy,
+    pub created_revision: u32,
+    pub last_state_change_revision: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyMaterialEnvelope {
+    pub encoding: MaterialEncoding,
+    pub material_len: u8,
+    pub material_bytes: Vec<u8, MAX_KEY_MATERIAL_LEN>,
+    pub destroyed_marker: bool,
+}
+
+impl Default for KeyMaterialEnvelope {
+    fn default() -> Self {
+        Self {
+            encoding: MaterialEncoding::Internal,
+            material_len: 0,
+            material_bytes: Vec::new(),
+            destroyed_marker: false,
+        }
+    }
+}
+
+impl KeyMaterialEnvelope {
+    #[must_use]
+    pub fn try_from_bytes(origin: KeyOrigin, bytes: &[u8]) -> Option<Self> {
+        if bytes.is_empty() || bytes.len() > MAX_KEY_MATERIAL_LEN {
+            return None;
+        }
+
+        let mut material_bytes = Vec::new();
+        material_bytes.extend_from_slice(bytes).ok()?;
+        let material_len = u8::try_from(bytes.len()).ok()?;
+        Some(Self {
+            encoding: if origin == KeyOrigin::Imported {
+                MaterialEncoding::WrappedImport
+            } else {
+                MaterialEncoding::Internal
+            },
+            material_len,
+            material_bytes,
+            destroyed_marker: false,
+        })
+    }
+
+    pub fn clear(&mut self) {
+        for byte in &mut self.material_bytes {
+            *byte = 0;
+        }
+        self.material_bytes.clear();
+        self.material_len = 0;
+        self.encoding = MaterialEncoding::Destroyed;
+        self.destroyed_marker = true;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyStoreRecord {
+    pub record_version: u8,
+    pub slot_id: u8,
+    pub key_id: u8,
+    pub record_revision: u32,
+    pub store_epoch: u32,
+    pub lifecycle_state: KeyLifecycleState,
+    pub metadata: KeyMetadata,
+    pub material: KeyMaterialEnvelope,
+    pub complete: bool,
+    pub integrity_tag: u32,
+}
+
+impl KeyStoreRecord {
+    #[must_use]
+    pub fn new(
+        slot_id: u8,
+        key_id: u8,
+        record_revision: u32,
+        store_epoch: u32,
+        lifecycle_state: KeyLifecycleState,
+        metadata: KeyMetadata,
+        material: KeyMaterialEnvelope,
+    ) -> Self {
+        let mut record = Self {
+            record_version: RECORD_VERSION,
+            slot_id,
+            key_id,
+            record_revision,
+            store_epoch,
+            lifecycle_state,
+            metadata,
+            material,
+            complete: true,
+            integrity_tag: 0,
+        };
+        record.refresh_integrity();
+        record
+    }
+
+    #[must_use]
+    pub fn verify_integrity(&self) -> bool {
+        self.complete && self.integrity_tag == self.compute_integrity_tag()
+    }
+
+    pub fn invalidate_material(&mut self) {
+        self.material.clear();
+        self.refresh_integrity();
+    }
+
+    pub fn refresh_integrity(&mut self) {
+        self.integrity_tag = self.compute_integrity_tag();
+    }
+
+    fn compute_integrity_tag(&self) -> u32 {
+        let mut tag = u32::from(self.record_version)
+            ^ u32::from(self.slot_id)
+            ^ u32::from(self.key_id)
+            ^ self.record_revision.rotate_left(7)
+            ^ self.store_epoch.rotate_left(13)
+            ^ u32::from(self.lifecycle_state as u8)
+            ^ u32::from(self.metadata.algorithm as u8) << 8
+            ^ u32::from(self.metadata.origin as u8) << 16
+            ^ u32::from(self.metadata.export_policy as u8) << 24
+            ^ u32::from(self.metadata.usage_mask);
+        for &byte in &self.material.material_bytes {
+            tag = tag.rotate_left(3) ^ u32::from(byte);
+        }
+        if self.material.destroyed_marker {
+            tag ^= 0xfeed_cafe;
+        }
+        if self.complete {
+            tag ^= 0x1357_9bdf;
+        }
+        tag
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FreshnessAnchor {
+    pub accepted_store_epoch: u32,
+    pub accepted_device_revision: u32,
+    pub store_revision: u32,
+    pub integrity_tag: u32,
+}
+
+impl FreshnessAnchor {
+    #[must_use]
+    pub fn new(device_revision: u32) -> Self {
+        let mut anchor = Self {
+            accepted_store_epoch: 0,
+            accepted_device_revision: device_revision,
+            store_revision: 0,
+            integrity_tag: 0,
+        };
+        anchor.refresh_integrity();
+        anchor
+    }
+
+    #[must_use]
+    pub fn verify_integrity(&self) -> bool {
+        self.integrity_tag == self.compute_integrity_tag()
+    }
+
+    pub fn refresh_integrity(&mut self) {
+        self.integrity_tag = self.compute_integrity_tag();
+    }
+
+    fn compute_integrity_tag(&self) -> u32 {
+        self.accepted_store_epoch.rotate_left(5)
+            ^ self.accepted_device_revision.rotate_left(11)
+            ^ self.store_revision.rotate_left(17)
+            ^ 0x2468_ace0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyStoreStatus {
+    pub store_state: KeyStoreState,
+    pub key_count: u8,
+    pub free_slots: u8,
+    pub rollback_detected: bool,
+    pub corruption_detected: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyRecordResult {
+    pub key_id: u8,
+    pub lifecycle_state: KeyLifecycleState,
+    pub record_revision: u32,
+    pub store_revision: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyMetadataView {
+    pub key_id: u8,
+    pub algorithm: KeyAlgorithm,
+    pub origin: KeyOrigin,
+    pub usage_mask: u8,
+    pub export_policy: ExportPolicy,
+    pub lifecycle_state: KeyLifecycleState,
+    pub record_revision: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyListEntry {
+    pub key_id: u8,
+    pub algorithm: KeyAlgorithm,
+    pub lifecycle_state: KeyLifecycleState,
+    pub usage_mask: u8,
+    pub export_policy: ExportPolicy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyDestroyResult {
+    pub key_id: u8,
+    pub lifecycle_state: KeyLifecycleState,
+    pub material_cleared: bool,
+    pub tombstone_committed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PutPersistentKeyRequest {
+    pub key_id: u8,
+    pub algorithm: KeyAlgorithm,
+    pub origin: KeyOrigin,
+    pub usage_mask: u8,
+    pub export_policy: ExportPolicy,
+    pub material: KeyMaterialEnvelope,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PersistentKeyStore {
+    pub journal: Vec<KeyStoreRecord, MAX_KEY_JOURNAL_RECORDS>,
+    pub anchor: FreshnessAnchor,
+    pub store_state: KeyStoreState,
+    pub rollback_detected: bool,
+    pub corruption_detected: bool,
+    current_device_revision: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyStoreSnapshot {
+    pub journal: Vec<KeyStoreRecord, MAX_KEY_JOURNAL_RECORDS>,
+    pub anchor: FreshnessAnchor,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProvisioningRecord {
     pub record_version: u8,
@@ -295,8 +647,38 @@ impl ProvisioningRecord {
     }
 
     #[must_use]
+    pub fn revision_counter(&self) -> u32 {
+        self.revision_counter
+    }
+
+    #[must_use]
     pub fn verify_integrity(&self) -> bool {
         self.integrity_tag == self.compute_integrity_tag()
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> ProvisioningSnapshot {
+        ProvisioningSnapshot {
+            record_version: self.record_version,
+            lifecycle_state: self.lifecycle_state,
+            pending_transition: self.pending_transition.clone(),
+            owner_binding: self.owner_binding.clone(),
+            recovery_policy: self.recovery_policy,
+            revision_counter: self.revision_counter,
+            integrity_tag: self.integrity_tag,
+            next_transition_id: self.next_transition_id,
+        }
+    }
+
+    pub fn restore_snapshot(&mut self, snapshot: ProvisioningSnapshot) {
+        self.record_version = snapshot.record_version;
+        self.lifecycle_state = snapshot.lifecycle_state;
+        self.pending_transition = snapshot.pending_transition;
+        self.owner_binding = snapshot.owner_binding;
+        self.recovery_policy = snapshot.recovery_policy;
+        self.revision_counter = snapshot.revision_counter;
+        self.integrity_tag = snapshot.integrity_tag;
+        self.next_transition_id = snapshot.next_transition_id;
     }
 
     pub fn reconcile_after_boot(&mut self) {
@@ -607,6 +989,402 @@ impl ProvisioningRecord {
     }
 }
 
+impl PersistentKeyStore {
+    #[must_use]
+    pub fn new(device_revision: u32) -> Self {
+        Self {
+            journal: Vec::new(),
+            anchor: FreshnessAnchor::new(device_revision),
+            store_state: KeyStoreState::Empty,
+            rollback_detected: false,
+            corruption_detected: false,
+            current_device_revision: device_revision,
+        }
+    }
+
+    pub fn sync_device_revision(&mut self, device_revision: u32) {
+        self.current_device_revision = device_revision;
+        if self.journal.is_empty() && self.store_state != KeyStoreState::RecoveryRequired {
+            self.anchor.accepted_device_revision = device_revision;
+            self.anchor.refresh_integrity();
+        }
+    }
+
+    pub fn clear_all(&mut self) {
+        for record in &mut self.journal {
+            record.invalidate_material();
+        }
+        self.journal.clear();
+        self.anchor = FreshnessAnchor::new(self.current_device_revision);
+        self.store_state = KeyStoreState::Empty;
+        self.rollback_detected = false;
+        self.corruption_detected = false;
+    }
+
+    pub fn restore_snapshot(&mut self, snapshot: KeyStoreSnapshot) {
+        self.journal = snapshot.journal;
+        self.anchor = snapshot.anchor;
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> KeyStoreSnapshot {
+        KeyStoreSnapshot {
+            journal: self.journal.clone(),
+            anchor: self.anchor,
+        }
+    }
+
+    pub fn reconcile_after_boot(&mut self) {
+        self.rollback_detected = false;
+        self.corruption_detected = false;
+
+        if self.journal.is_empty() {
+            self.store_state = KeyStoreState::Empty;
+            self.anchor.accepted_device_revision = self.current_device_revision;
+            self.anchor.refresh_integrity();
+            return;
+        }
+
+        if !self.anchor.verify_integrity() {
+            self.corruption_detected = true;
+            self.store_state = KeyStoreState::RecoveryRequired;
+            return;
+        }
+
+        let mut highest_epoch = 0;
+        let mut seen = [None::<(u32, u32)>; MAX_PERSISTENT_KEYS];
+        for record in &self.journal {
+            if !record.verify_integrity() {
+                self.corruption_detected = true;
+                continue;
+            }
+
+            if record.store_epoch > highest_epoch {
+                highest_epoch = record.store_epoch;
+            }
+
+            if record.key_id == 0 || usize::from(record.key_id) > MAX_PERSISTENT_KEYS {
+                self.corruption_detected = true;
+                continue;
+            }
+            let slot = usize::from(record.key_id - 1);
+
+            if let Some((revision, tag)) = seen[slot]
+                && revision == record.record_revision
+                && tag != record.integrity_tag
+            {
+                self.corruption_detected = true;
+            } else {
+                seen[slot] = Some((record.record_revision, record.integrity_tag));
+            }
+        }
+
+        if highest_epoch > self.anchor.accepted_store_epoch
+            || self.anchor.accepted_device_revision < self.current_device_revision
+        {
+            self.rollback_detected = true;
+        }
+
+        self.refresh_store_state();
+    }
+
+    #[must_use]
+    pub fn status(&self) -> KeyStoreStatus {
+        let key_count = u8::try_from(self.active_key_count()).unwrap_or(0);
+        let free_slots = u8::try_from(MAX_PERSISTENT_KEYS.saturating_sub(self.live_record_count()))
+            .unwrap_or(0);
+        KeyStoreStatus {
+            store_state: self.store_state,
+            key_count,
+            free_slots,
+            rollback_detected: self.rollback_detected,
+            corruption_detected: self.corruption_detected,
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Returns `StatusCode::ValidationError` for malformed metadata or
+    /// material and `StatusCode::StateError` when the store is full or not
+    /// ready to accept writes.
+    pub fn put_persistent_key(
+        &mut self,
+        request: &PutPersistentKeyRequest,
+    ) -> Result<KeyRecordResult, StatusCode> {
+        self.ensure_ready_for_write()?;
+        Self::validate_put_request(request)?;
+
+        if self.find_latest_record(request.key_id).is_some() {
+            return Err(StatusCode::StateError);
+        }
+
+        let slot_id = self.next_slot_id()?;
+        let store_epoch = self.anchor.accepted_store_epoch.saturating_add(1);
+        let record_revision = 1;
+        let metadata = KeyMetadata {
+            algorithm: request.algorithm,
+            origin: request.origin,
+            usage_mask: request.usage_mask,
+            export_policy: request.export_policy,
+            created_revision: self.anchor.store_revision.saturating_add(1),
+            last_state_change_revision: self.anchor.store_revision.saturating_add(1),
+        };
+        let mut record = KeyStoreRecord::new(
+            slot_id,
+            request.key_id,
+            record_revision,
+            store_epoch,
+            KeyLifecycleState::Active,
+            metadata,
+            request.material.clone(),
+        );
+        record.refresh_integrity();
+        self.push_record(record)?;
+        self.commit_anchor(store_epoch);
+
+        Ok(KeyRecordResult {
+            key_id: request.key_id,
+            lifecycle_state: KeyLifecycleState::Active,
+            record_revision,
+            store_revision: self.anchor.store_revision,
+        })
+    }
+
+    /// # Errors
+    ///
+    /// Returns `StatusCode::StateError` when the store is non-ready or the key
+    /// cannot transition to revoked.
+    pub fn revoke_key(&mut self, key_id: u8) -> Result<KeyRecordResult, StatusCode> {
+        self.ensure_ready_for_write()?;
+        let latest = self.latest_live_record(key_id)?;
+        if latest.lifecycle_state != KeyLifecycleState::Active {
+            return Err(StatusCode::StateError);
+        }
+
+        let store_epoch = self.anchor.accepted_store_epoch.saturating_add(1);
+        let record_revision = latest.record_revision.saturating_add(1);
+        let mut metadata = latest.metadata.clone();
+        metadata.last_state_change_revision = self.anchor.store_revision.saturating_add(1);
+        let record = KeyStoreRecord::new(
+            self.next_slot_id()?,
+            key_id,
+            record_revision,
+            store_epoch,
+            KeyLifecycleState::Revoked,
+            metadata,
+            latest.material.clone(),
+        );
+        self.push_record(record)?;
+        self.commit_anchor(store_epoch);
+
+        Ok(KeyRecordResult {
+            key_id,
+            lifecycle_state: KeyLifecycleState::Revoked,
+            record_revision,
+            store_revision: self.anchor.store_revision,
+        })
+    }
+
+    /// # Errors
+    ///
+    /// Returns `StatusCode::StateError` when the key cannot transition to a
+    /// destroyed state.
+    pub fn destroy_key(&mut self, key_id: u8) -> Result<KeyDestroyResult, StatusCode> {
+        self.ensure_ready_for_write()?;
+        let latest = self.latest_live_record(key_id)?;
+        if matches!(latest.lifecycle_state, KeyLifecycleState::Destroyed | KeyLifecycleState::PendingDestroy) {
+            return Err(StatusCode::StateError);
+        }
+
+        let store_epoch = self.anchor.accepted_store_epoch.saturating_add(1);
+        let record_revision = latest.record_revision.saturating_add(1);
+        let mut metadata = latest.metadata.clone();
+        metadata.last_state_change_revision = self.anchor.store_revision.saturating_add(1);
+        let mut material = latest.material.clone();
+        material.clear();
+        let record = KeyStoreRecord::new(
+            self.next_slot_id()?,
+            key_id,
+            record_revision,
+            store_epoch,
+            KeyLifecycleState::Destroyed,
+            metadata,
+            material,
+        );
+        self.push_record(record)?;
+        self.commit_anchor(store_epoch);
+
+        Ok(KeyDestroyResult {
+            key_id,
+            lifecycle_state: KeyLifecycleState::Destroyed,
+            material_cleared: true,
+            tombstone_committed: true,
+        })
+    }
+
+    /// # Errors
+    ///
+    /// Returns `StatusCode::StateError` when the store is non-ready or the key
+    /// is unavailable.
+    pub fn get_key_metadata(&self, key_id: u8) -> Result<KeyMetadataView, StatusCode> {
+        self.ensure_ready_for_read()?;
+        let record = self.latest_live_record(key_id)?;
+        Ok(KeyMetadataView {
+            key_id,
+            algorithm: record.metadata.algorithm,
+            origin: record.metadata.origin,
+            usage_mask: record.metadata.usage_mask,
+            export_policy: record.metadata.export_policy,
+            lifecycle_state: record.lifecycle_state,
+            record_revision: record.record_revision,
+        })
+    }
+
+    /// # Errors
+    ///
+    /// Returns `StatusCode::StateError` when the store is non-ready.
+    pub fn list_keys(&self) -> Result<Vec<KeyListEntry, MAX_KEY_LIST_ENTRIES>, StatusCode> {
+        self.ensure_ready_for_read()?;
+        let mut entries = Vec::new();
+        for key_id in 1..=MAX_PERSISTENT_KEYS {
+            if let Some(record) = self.find_latest_record(u8::try_from(key_id).unwrap_or(0)) {
+                let _ = entries.push(KeyListEntry {
+                    key_id: record.key_id,
+                    algorithm: record.metadata.algorithm,
+                    lifecycle_state: record.lifecycle_state,
+                    usage_mask: record.metadata.usage_mask,
+                    export_policy: record.metadata.export_policy,
+                });
+            }
+        }
+        Ok(entries)
+    }
+
+    /// # Errors
+    ///
+    /// Returns `StatusCode::StateError` when the key is not active or the store
+    /// is not ready, and `StatusCode::AuthorizationError` when export is
+    /// disallowed.
+    pub fn assert_key_operation(
+        &self,
+        key_id: u8,
+        usage_mask: u8,
+        export_requested: bool,
+    ) -> Result<(), StatusCode> {
+        self.ensure_ready_for_read()?;
+        let record = self.latest_live_record(key_id)?;
+        if record.lifecycle_state != KeyLifecycleState::Active {
+            return Err(StatusCode::StateError);
+        }
+
+        if record.metadata.usage_mask & usage_mask == 0 {
+            return Err(StatusCode::AuthorizationError);
+        }
+
+        if export_requested && record.metadata.export_policy == ExportPolicy::NonExportable {
+            return Err(StatusCode::AuthorizationError);
+        }
+
+        Ok(())
+    }
+
+    fn validate_put_request(request: &PutPersistentKeyRequest) -> Result<(), StatusCode> {
+        if request.key_id == 0 {
+            return Err(StatusCode::ValidationError);
+        }
+        if request.usage_mask == 0 || request.material.material_len == 0 {
+            return Err(StatusCode::ValidationError);
+        }
+        Ok(())
+    }
+
+    fn latest_live_record(&self, key_id: u8) -> Result<&KeyStoreRecord, StatusCode> {
+        self.find_latest_record(key_id).ok_or(StatusCode::StateError)
+    }
+
+    fn find_latest_record(&self, key_id: u8) -> Option<&KeyStoreRecord> {
+        self.journal
+            .iter()
+            .filter(|record| record.key_id == key_id && record.verify_integrity())
+            .max_by_key(|record| (record.record_revision, record.store_epoch))
+    }
+
+    fn next_slot_id(&self) -> Result<u8, StatusCode> {
+        if self.live_record_count() >= MAX_PERSISTENT_KEYS {
+            return Err(StatusCode::StateError);
+        }
+        u8::try_from(self.journal.len()).map_err(|_| StatusCode::StateError)
+    }
+
+    fn push_record(&mut self, record: KeyStoreRecord) -> Result<(), StatusCode> {
+        self.journal.push(record).map_err(|_| StatusCode::StateError)
+    }
+
+    fn commit_anchor(&mut self, store_epoch: u32) {
+        self.anchor.accepted_store_epoch = store_epoch;
+        self.anchor.accepted_device_revision = self.current_device_revision;
+        self.anchor.store_revision = self.anchor.store_revision.saturating_add(1);
+        self.anchor.refresh_integrity();
+        self.rollback_detected = false;
+        self.corruption_detected = false;
+        self.refresh_store_state();
+    }
+
+    fn ensure_ready_for_write(&self) -> Result<(), StatusCode> {
+        if matches!(self.store_state, KeyStoreState::Degraded | KeyStoreState::RecoveryRequired) {
+            return Err(StatusCode::StateError);
+        }
+        Ok(())
+    }
+
+    fn ensure_ready_for_read(&self) -> Result<(), StatusCode> {
+        if !matches!(
+            self.store_state,
+            KeyStoreState::Ready | KeyStoreState::Empty | KeyStoreState::Full
+        ) {
+            return Err(StatusCode::StateError);
+        }
+        Ok(())
+    }
+
+    fn active_key_count(&self) -> usize {
+        let mut count = 0;
+        for key_id in 1..=MAX_PERSISTENT_KEYS {
+            let key_id = u8::try_from(key_id).unwrap_or(0);
+            if self
+                .find_latest_record(key_id)
+                .is_some_and(|record| record.lifecycle_state != KeyLifecycleState::Destroyed)
+            {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    fn live_record_count(&self) -> usize {
+        self.active_key_count()
+    }
+
+    fn refresh_store_state(&mut self) {
+        if self.rollback_detected {
+            self.store_state = KeyStoreState::RecoveryRequired;
+            return;
+        }
+        if self.corruption_detected {
+            self.store_state = KeyStoreState::Degraded;
+            return;
+        }
+        let live = self.live_record_count();
+        self.store_state = if live == 0 {
+            KeyStoreState::Empty
+        } else if live >= MAX_PERSISTENT_KEYS {
+            KeyStoreState::Full
+        } else {
+            KeyStoreState::Ready
+        };
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionTracker {
     pub last_request_fingerprint: Option<u32>,
@@ -685,6 +1463,14 @@ pub fn ensure_command_allowed(
                 return Err(StatusCode::AuthorizationError);
             }
         }
+        AuthorityRole::KeyManager => {
+            if !matches!(
+                session_state,
+                SessionState::Administrator | SessionState::Recovery | SessionState::Developer
+            ) {
+                return Err(StatusCode::AuthorizationError);
+            }
+        }
     }
 
     if !definition.enabled {
@@ -756,6 +1542,11 @@ pub const fn finalize_marker() -> u8 {
 #[must_use]
 pub const fn reactivate_marker() -> u8 {
     REACTIVATE_MARKER
+}
+
+#[must_use]
+pub const fn revoke_marker() -> u8 {
+    REVOKE_MARKER
 }
 
 #[must_use]

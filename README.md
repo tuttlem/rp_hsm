@@ -106,9 +106,30 @@ The probe expects a `developer-mode` firmware image and validates:
 1. protocol version and device status
 2. public and restricted command catalogs
 3. provisioning from `factory` to `operational`
-4. lock, unlock, and recovery transitions
-5. zeroize behavior
-6. developer-only lifecycle reset back to `factory`
+4. flash-backed persistent key-store retention across a developer-triggered reboot
+5. persistent key-store create, metadata, revoke, destroy, and full-store handling
+6. rollback-required and degraded store behavior via developer-only persisted-store fault injection
+7. developer-only lifecycle reset back to `factory`
+
+Catalog note:
+
+- The probe treats restricted command catalogs as membership-based unless a
+  feature contract explicitly requires stable ordering.
+
+Important:
+
+- The firmware reserves the top 8 KiB of the configured 2 MiB flash image for
+  developer-mode persistent-state snapshots. That space is outside the linked
+  application image.
+- The probe now expects real flash-backed persistence, developer reboot, and
+  developer-only persisted-store fault controls to be present in the flashed
+  firmware image.
+- `cargo probe` is an on-device validation command. It will reboot the board
+  and intentionally inject rollback and corruption test states while it runs.
+- The reserved persistent-state flash region is intentionally preserved across
+  normal firmware reflashes. In `developer-mode`, the probe will issue a
+  developer reset automatically if the device boots with previously persisted
+  lab state.
 
 If the probe fails with `Permission denied`, check the device node ownership first:
 

@@ -9,6 +9,8 @@
 
 #[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
 mod logging;
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+mod persistence;
 
 #[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
 use embedded_hal::digital::OutputPin;
@@ -20,7 +22,8 @@ use panic_halt as _;
     feature = "developer-mode"
 ))]
 use protocol::protocol::{
-    DeviceState, ProtocolEngine, SessionState, clear_transient_buffer,
+    DeviceState, FirmwareAction, ProtocolEngine, SessionState, StatusCode,
+    clear_transient_buffer, status_response,
 };
 #[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
 use rp235x_hal as hal;
@@ -111,6 +114,27 @@ fn main() -> ! {
     let mut protocol_engine = ProtocolEngine::new(DeviceState::Factory, SessionState::Developer);
     #[cfg(feature = "developer-mode")]
     protocol_engine.set_developer_mode(true);
+    #[cfg(feature = "developer-mode")]
+    #[cfg(feature = "developer-mode")]
+    match persistence::FlashStateStore::load() {
+        Ok(persistence::LoadOutcome::Restored(state)) => {
+            protocol_engine.restore_provisioning_snapshot(state.provisioning);
+            protocol_engine.restore_key_store(state.key_store);
+        }
+        Ok(persistence::LoadOutcome::Corrupted) => {
+            let fallback = persistence::corrupted_recovery_state();
+            protocol_engine.restore_provisioning_snapshot(fallback.provisioning);
+            protocol_engine.restore_key_store(fallback.key_store);
+        }
+        Ok(persistence::LoadOutcome::Empty) | Err(_) => {}
+    }
+    #[cfg(feature = "developer-mode")]
+    protocol_engine.reconcile_boot();
+    #[cfg(feature = "developer-mode")]
+    let _ = persistence::FlashStateStore::save(&persistence::PersistedState {
+        provisioning: protocol_engine.provisioning_snapshot(),
+        key_store: protocol_engine.key_store().snapshot(),
+    });
     let mut led_is_on = false;
     let mut next_toggle_at = timer.get_counter().ticks();
     #[cfg(feature = "developer-mode")]
@@ -136,9 +160,51 @@ fn main() -> ! {
                 && let Ok(count) = serial.read(&mut buf)
                 && count > 0
             {
-                let response = protocol_engine.handle_bytes(&buf[..count]);
+                let prior_provisioning = protocol_engine.provisioning_snapshot();
+                let prior_key_store = protocol_engine.key_store().snapshot();
+                let mut response = protocol_engine.handle_bytes(&buf[..count]);
+                let mut reboot_requested = false;
+                if response.code == StatusCode::Success.as_u8() {
+                    let current_provisioning = protocol_engine.provisioning_snapshot();
+                    let current_key_store = protocol_engine.key_store().snapshot();
+                    if current_provisioning != prior_provisioning
+                        || current_key_store != prior_key_store
+                    {
+                        let persist_result = persistence::FlashStateStore::save(&persistence::PersistedState {
+                            provisioning: current_provisioning.clone(),
+                            key_store: current_key_store.clone(),
+                        });
+                        if persist_result.is_err() {
+                            protocol_engine.restore_provisioning_snapshot(prior_provisioning);
+                            protocol_engine.restore_key_store(prior_key_store);
+                            let _ = protocol_engine.take_firmware_action();
+                            response = status_response(StatusCode::InternalError, &[]);
+                        }
+                    }
+                }
+                if response.code == StatusCode::Success.as_u8()
+                    && let Some(action) = protocol_engine.take_firmware_action()
+                {
+                    match action {
+                        FirmwareAction::DeveloperStoreFault(action) => {
+                            if persistence::FlashStateStore::inject_fault(action).is_err() {
+                                response = status_response(StatusCode::InternalError, &[]);
+                            }
+                        }
+                        FirmwareAction::DeveloperReboot => {
+                            reboot_requested = true;
+                        }
+                    }
+                }
                 if let Some(encoded) = protocol::protocol::encode_frame(&response) {
                     let _ = serial.write(&encoded);
+                }
+                if reboot_requested && response.code == StatusCode::Success.as_u8() {
+                    logln!("developer reboot requested");
+                    hal::reboot::reboot(
+                        hal::reboot::RebootKind::Normal,
+                        hal::reboot::RebootArch::Riscv,
+                    );
                 }
                 clear_transient_buffer(&mut buf[..count]);
             }

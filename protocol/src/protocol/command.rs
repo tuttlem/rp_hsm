@@ -5,6 +5,7 @@ pub enum CommandFamily {
     Discovery,
     Status,
     Lifecycle,
+    KeyStore,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,6 +15,7 @@ pub enum CommandId {
     GetDeviceStatus = 0x02,
     GetCommandCatalog = 0x03,
     GetLifecycleStatus = 0x04,
+    GetKeyStoreStatus = 0x05,
     BeginProvisioning = 0x80,
     FinalizeProvisioning = 0x81,
     LockDevice = 0x82,
@@ -23,6 +25,13 @@ pub enum CommandId {
     ReactivateRecoveredProvisioning = 0x86,
     ExecuteZeroize = 0x87,
     DeveloperResetLifecycle = 0x88,
+    PutPersistentKey = 0x89,
+    ListPersistentKeys = 0x8a,
+    GetKeyMetadata = 0x8b,
+    RevokePersistentKey = 0x8c,
+    DestroyPersistentKey = 0x8d,
+    DeveloperStoreFault = 0x8e,
+    DeveloperReboot = 0x8f,
 }
 
 impl CommandId {
@@ -33,6 +42,7 @@ impl CommandId {
             0x02 => Some(Self::GetDeviceStatus),
             0x03 => Some(Self::GetCommandCatalog),
             0x04 => Some(Self::GetLifecycleStatus),
+            0x05 => Some(Self::GetKeyStoreStatus),
             0x80 => Some(Self::BeginProvisioning),
             0x81 => Some(Self::FinalizeProvisioning),
             0x82 => Some(Self::LockDevice),
@@ -42,6 +52,13 @@ impl CommandId {
             0x86 => Some(Self::ReactivateRecoveredProvisioning),
             0x87 => Some(Self::ExecuteZeroize),
             0x88 => Some(Self::DeveloperResetLifecycle),
+            0x89 => Some(Self::PutPersistentKey),
+            0x8a => Some(Self::ListPersistentKeys),
+            0x8b => Some(Self::GetKeyMetadata),
+            0x8c => Some(Self::RevokePersistentKey),
+            0x8d => Some(Self::DestroyPersistentKey),
+            0x8e => Some(Self::DeveloperStoreFault),
+            0x8f => Some(Self::DeveloperReboot),
             _ => None,
         }
     }
@@ -86,6 +103,11 @@ const PROVISIONED_ONLY: &[DeviceState] = &[DeviceState::Provisioned];
 const OPERATIONAL_ONLY: &[DeviceState] = &[DeviceState::Operational];
 const LOCKED_ONLY: &[DeviceState] = &[DeviceState::Locked];
 const RECOVERY_ONLY: &[DeviceState] = &[DeviceState::Recovery];
+const KEY_QUERY_STATES: &[DeviceState] = &[
+    DeviceState::Operational,
+    DeviceState::Locked,
+    DeviceState::Recovery,
+];
 const ZEROIZE_ALLOWED: &[DeviceState] = &[
     DeviceState::Provisioned,
     DeviceState::Operational,
@@ -134,6 +156,19 @@ pub const GET_COMMAND_CATALOG: CommandDefinition = CommandDefinition {
 
 pub const GET_LIFECYCLE_STATUS: CommandDefinition = CommandDefinition {
     id: CommandId::GetLifecycleStatus,
+    family: CommandFamily::Status,
+    min_payload_len: 0,
+    max_payload_len: 0,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Public,
+    replay_policy: ReplayPolicy::Repeatable,
+    idempotency_policy: IdempotencyPolicy::Idempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const GET_KEY_STORE_STATUS: CommandDefinition = CommandDefinition {
+    id: CommandId::GetKeyStoreStatus,
     family: CommandFamily::Status,
     min_payload_len: 0,
     max_payload_len: 0,
@@ -262,11 +297,103 @@ pub const DEVELOPER_RESET_LIFECYCLE: CommandDefinition = CommandDefinition {
     developer_only: true,
 };
 
+pub const PUT_PERSISTENT_KEY: CommandDefinition = CommandDefinition {
+    id: CommandId::PutPersistentKey,
+    family: CommandFamily::KeyStore,
+    min_payload_len: 7,
+    max_payload_len: 30,
+    allowed_device_states: OPERATIONAL_ONLY,
+    required_role: AuthorityRole::Administrator,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const LIST_PERSISTENT_KEYS: CommandDefinition = CommandDefinition {
+    id: CommandId::ListPersistentKeys,
+    family: CommandFamily::KeyStore,
+    min_payload_len: 0,
+    max_payload_len: 0,
+    allowed_device_states: KEY_QUERY_STATES,
+    required_role: AuthorityRole::KeyManager,
+    replay_policy: ReplayPolicy::Repeatable,
+    idempotency_policy: IdempotencyPolicy::Idempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const GET_KEY_METADATA: CommandDefinition = CommandDefinition {
+    id: CommandId::GetKeyMetadata,
+    family: CommandFamily::KeyStore,
+    min_payload_len: 1,
+    max_payload_len: 1,
+    allowed_device_states: KEY_QUERY_STATES,
+    required_role: AuthorityRole::KeyManager,
+    replay_policy: ReplayPolicy::Repeatable,
+    idempotency_policy: IdempotencyPolicy::Idempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const REVOKE_PERSISTENT_KEY: CommandDefinition = CommandDefinition {
+    id: CommandId::RevokePersistentKey,
+    family: CommandFamily::KeyStore,
+    min_payload_len: 2,
+    max_payload_len: 2,
+    allowed_device_states: OPERATIONAL_ONLY,
+    required_role: AuthorityRole::Administrator,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const DESTROY_PERSISTENT_KEY: CommandDefinition = CommandDefinition {
+    id: CommandId::DestroyPersistentKey,
+    family: CommandFamily::KeyStore,
+    min_payload_len: 3,
+    max_payload_len: 3,
+    allowed_device_states: KEY_QUERY_STATES,
+    required_role: AuthorityRole::KeyManager,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const DEVELOPER_STORE_FAULT: CommandDefinition = CommandDefinition {
+    id: CommandId::DeveloperStoreFault,
+    family: CommandFamily::KeyStore,
+    min_payload_len: 1,
+    max_payload_len: 1,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Developer,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: true,
+};
+
+pub const DEVELOPER_REBOOT: CommandDefinition = CommandDefinition {
+    id: CommandId::DeveloperReboot,
+    family: CommandFamily::Lifecycle,
+    min_payload_len: 3,
+    max_payload_len: 3,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Developer,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: true,
+};
+
 pub const PUBLIC_COMMANDS: &[CommandDefinition] = &[
     GET_PROTOCOL_VERSION,
     GET_DEVICE_STATUS,
     GET_COMMAND_CATALOG,
     GET_LIFECYCLE_STATUS,
+    GET_KEY_STORE_STATUS,
 ];
 
 pub const RESTRICTED_COMMANDS: &[CommandDefinition] = &[
@@ -278,9 +405,18 @@ pub const RESTRICTED_COMMANDS: &[CommandDefinition] = &[
     RECOVER_TO_PROVISIONED,
     REACTIVATE_RECOVERED_PROVISIONING,
     EXECUTE_ZEROIZE,
+    PUT_PERSISTENT_KEY,
+    LIST_PERSISTENT_KEYS,
+    GET_KEY_METADATA,
+    REVOKE_PERSISTENT_KEY,
+    DESTROY_PERSISTENT_KEY,
 ];
 
-pub const DEVELOPER_COMMANDS: &[CommandDefinition] = &[DEVELOPER_RESET_LIFECYCLE];
+pub const DEVELOPER_COMMANDS: &[CommandDefinition] = &[
+    DEVELOPER_RESET_LIFECYCLE,
+    DEVELOPER_STORE_FAULT,
+    DEVELOPER_REBOOT,
+];
 
 pub fn lookup_command(id: u8) -> Option<CommandDefinition> {
     CommandId::from_byte(id).map(definition_for)
@@ -293,6 +429,7 @@ pub fn definition_for(id: CommandId) -> CommandDefinition {
         CommandId::GetDeviceStatus => GET_DEVICE_STATUS,
         CommandId::GetCommandCatalog => GET_COMMAND_CATALOG,
         CommandId::GetLifecycleStatus => GET_LIFECYCLE_STATUS,
+        CommandId::GetKeyStoreStatus => GET_KEY_STORE_STATUS,
         CommandId::BeginProvisioning => BEGIN_PROVISIONING,
         CommandId::FinalizeProvisioning => FINALIZE_PROVISIONING,
         CommandId::LockDevice => LOCK_DEVICE,
@@ -302,6 +439,13 @@ pub fn definition_for(id: CommandId) -> CommandDefinition {
         CommandId::ReactivateRecoveredProvisioning => REACTIVATE_RECOVERED_PROVISIONING,
         CommandId::ExecuteZeroize => EXECUTE_ZEROIZE,
         CommandId::DeveloperResetLifecycle => DEVELOPER_RESET_LIFECYCLE,
+        CommandId::PutPersistentKey => PUT_PERSISTENT_KEY,
+        CommandId::ListPersistentKeys => LIST_PERSISTENT_KEYS,
+        CommandId::GetKeyMetadata => GET_KEY_METADATA,
+        CommandId::RevokePersistentKey => REVOKE_PERSISTENT_KEY,
+        CommandId::DestroyPersistentKey => DESTROY_PERSISTENT_KEY,
+        CommandId::DeveloperStoreFault => DEVELOPER_STORE_FAULT,
+        CommandId::DeveloperReboot => DEVELOPER_REBOOT,
     }
 }
 
@@ -331,6 +475,7 @@ pub fn get_visible_catalog(
                 GET_DEVICE_STATUS,
                 GET_COMMAND_CATALOG,
                 GET_LIFECYCLE_STATUS,
+                GET_KEY_STORE_STATUS,
                 BEGIN_PROVISIONING,
                 FINALIZE_PROVISIONING,
                 LOCK_DEVICE,
@@ -339,7 +484,14 @@ pub fn get_visible_catalog(
                 RECOVER_TO_PROVISIONED,
                 REACTIVATE_RECOVERED_PROVISIONING,
                 EXECUTE_ZEROIZE,
+                PUT_PERSISTENT_KEY,
+                LIST_PERSISTENT_KEYS,
+                GET_KEY_METADATA,
+                REVOKE_PERSISTENT_KEY,
+                DESTROY_PERSISTENT_KEY,
                 DEVELOPER_RESET_LIFECYCLE,
+                DEVELOPER_STORE_FAULT,
+                DEVELOPER_REBOOT,
             ]
         } else {
             &[
@@ -347,6 +499,7 @@ pub fn get_visible_catalog(
                 GET_DEVICE_STATUS,
                 GET_COMMAND_CATALOG,
                 GET_LIFECYCLE_STATUS,
+                GET_KEY_STORE_STATUS,
                 BEGIN_PROVISIONING,
                 FINALIZE_PROVISIONING,
                 LOCK_DEVICE,
@@ -355,6 +508,11 @@ pub fn get_visible_catalog(
                 RECOVER_TO_PROVISIONED,
                 REACTIVATE_RECOVERED_PROVISIONING,
                 EXECUTE_ZEROIZE,
+                PUT_PERSISTENT_KEY,
+                LIST_PERSISTENT_KEYS,
+                GET_KEY_METADATA,
+                REVOKE_PERSISTENT_KEY,
+                DESTROY_PERSISTENT_KEY,
             ]
         }
     } else {
