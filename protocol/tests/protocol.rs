@@ -36,3 +36,13 @@ mod store_corruption;
 mod rollback_detection;
 #[path = "protocol/store_capacity.rs"]
 mod store_capacity;
+#[path = "protocol/auth_administrative_access.rs"]
+mod auth_administrative_access;
+#[path = "protocol/session_boundaries.rs"]
+mod session_boundaries;
+#[path = "protocol/session_invalidation.rs"]
+mod session_invalidation;
+#[path = "protocol/auth_lockout.rs"]
+mod auth_lockout;
+#[path = "protocol/session_freshness.rs"]
+mod session_freshness;

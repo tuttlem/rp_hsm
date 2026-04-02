@@ -16,3 +16,7 @@ mod key_store_vectors;
 mod key_lifecycle_vectors;
 #[path = "contract/key_store_recovery_vectors.rs"]
 mod key_store_recovery_vectors;
+#[path = "contract/auth_command_vectors.rs"]
+mod auth_command_vectors;
+#[path = "contract/auth_redaction_vectors.rs"]
+mod auth_redaction_vectors;

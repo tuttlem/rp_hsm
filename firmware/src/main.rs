@@ -120,11 +120,13 @@ fn main() -> ! {
         Ok(persistence::LoadOutcome::Restored(state)) => {
             protocol_engine.restore_provisioning_snapshot(state.provisioning);
             protocol_engine.restore_key_store(state.key_store);
+            protocol_engine.restore_auth_snapshot(state.auth);
         }
         Ok(persistence::LoadOutcome::Corrupted) => {
             let fallback = persistence::corrupted_recovery_state();
             protocol_engine.restore_provisioning_snapshot(fallback.provisioning);
             protocol_engine.restore_key_store(fallback.key_store);
+            protocol_engine.restore_auth_snapshot(fallback.auth);
         }
         Ok(persistence::LoadOutcome::Empty) | Err(_) => {}
     }
@@ -134,16 +136,12 @@ fn main() -> ! {
     let _ = persistence::FlashStateStore::save(&persistence::PersistedState {
         provisioning: protocol_engine.provisioning_snapshot(),
         key_store: protocol_engine.key_store().snapshot(),
+        auth: protocol_engine.auth_snapshot().clone(),
     });
     let mut led_is_on = false;
     let mut next_toggle_at = timer.get_counter().ticks();
     #[cfg(feature = "developer-mode")]
     let mut host_connected = false;
-
-    #[cfg(feature = "developer-mode")]
-    logln!("boot");
-    #[cfg(feature = "developer-mode")]
-    logln!("rp_hsm developer-mode starting");
 
     loop {
         #[cfg(feature = "developer-mode")]
@@ -151,7 +149,6 @@ fn main() -> ! {
             let dtr = serial.dtr();
             if dtr && !host_connected {
                 host_connected = true;
-                logln!("developer console connected");
             } else if !dtr && host_connected {
                 host_connected = false;
             }
@@ -162,21 +159,26 @@ fn main() -> ! {
             {
                 let prior_provisioning = protocol_engine.provisioning_snapshot();
                 let prior_key_store = protocol_engine.key_store().snapshot();
+                let prior_auth = protocol_engine.auth_snapshot().clone();
                 let mut response = protocol_engine.handle_bytes(&buf[..count]);
                 let mut reboot_requested = false;
                 if response.code == StatusCode::Success.as_u8() {
                     let current_provisioning = protocol_engine.provisioning_snapshot();
                     let current_key_store = protocol_engine.key_store().snapshot();
+                    let current_auth = protocol_engine.auth_snapshot().clone();
                     if current_provisioning != prior_provisioning
                         || current_key_store != prior_key_store
+                        || current_auth != prior_auth
                     {
                         let persist_result = persistence::FlashStateStore::save(&persistence::PersistedState {
                             provisioning: current_provisioning.clone(),
                             key_store: current_key_store.clone(),
+                            auth: current_auth.clone(),
                         });
                         if persist_result.is_err() {
                             protocol_engine.restore_provisioning_snapshot(prior_provisioning);
                             protocol_engine.restore_key_store(prior_key_store);
+                            protocol_engine.restore_auth_snapshot(prior_auth);
                             let _ = protocol_engine.take_firmware_action();
                             response = status_response(StatusCode::InternalError, &[]);
                         }
@@ -200,7 +202,6 @@ fn main() -> ! {
                     let _ = serial.write(&encoded);
                 }
                 if reboot_requested && response.code == StatusCode::Success.as_u8() {
-                    logln!("developer reboot requested");
                     hal::reboot::reboot(
                         hal::reboot::RebootKind::Normal,
                         hal::reboot::RebootArch::Riscv,
@@ -224,13 +225,9 @@ fn main() -> ! {
 
             if led_is_on {
                 led.set_high().ok();
-                #[cfg(feature = "developer-mode")]
-                logln!("heartbeat: on");
                 next_toggle_at = now + LED_ON_TICKS;
             } else {
                 led.set_low().ok();
-                #[cfg(feature = "developer-mode")]
-                logln!("heartbeat: off");
                 next_toggle_at = now + LED_OFF_TICKS;
             }
         }

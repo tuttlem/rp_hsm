@@ -5,10 +5,10 @@ use super::frame::{
     RESERVED_FLAG_MASK,
 };
 use super::state::{
-    DeveloperResetOutcome, DeviceState, ExportPolicy, KeyAlgorithm, KeyDestroyResult,
+    AuthorityRole, DeveloperResetOutcome, DeviceState, ExportPolicy, KeyAlgorithm, KeyDestroyResult,
     KeyListEntry, KeyMaterialEnvelope, KeyMetadataView, KeyOrigin,
     KeyRecordResult, KeyStoreStatus, LifecycleStatus, LockResult, PutPersistentKeyRequest,
-    RecoveryResult, SessionState, StateRevision, TransitionResult, ZeroizeOutcome,
+    RecoveryResult, SessionState, SessionStatus, StateRevision, TransitionResult, ZeroizeOutcome,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,6 +146,58 @@ pub fn encode_key_store_status_payload(status: KeyStoreStatus) -> [u8; 5] {
 }
 
 #[must_use]
+pub fn encode_auth_challenge_payload(
+    challenge_id: u32,
+    role: AuthorityRole,
+    nonce: &[u8],
+    expires_after_ticks: u16,
+) -> Option<Vec<u8, MAX_PAYLOAD_LEN>> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&challenge_id.to_le_bytes()).ok()?;
+    payload.push(role as u8).ok()?;
+    payload.push(u8::try_from(nonce.len()).ok()?).ok()?;
+    payload.extend_from_slice(nonce).ok()?;
+    payload.extend_from_slice(&expires_after_ticks.to_le_bytes()).ok()?;
+    Some(payload)
+}
+
+#[must_use]
+pub fn encode_auth_session_payload(
+    session_id: u32,
+    role: AuthorityRole,
+    session_timeout_ticks: u16,
+    next_counter: u32,
+) -> [u8; 11] {
+    let session_id = session_id.to_le_bytes();
+    let next_counter = next_counter.to_le_bytes();
+    [
+        session_id[0],
+        session_id[1],
+        session_id[2],
+        session_id[3],
+        role as u8,
+        session_timeout_ticks.to_le_bytes()[0],
+        session_timeout_ticks.to_le_bytes()[1],
+        next_counter[0],
+        next_counter[1],
+        next_counter[2],
+        next_counter[3],
+    ]
+}
+
+#[must_use]
+pub fn encode_session_status_payload(status: SessionStatus) -> [u8; 6] {
+    [
+        u8::from(status.session_present),
+        status.active_role as u8,
+        status.expires_in_ticks.to_le_bytes()[0],
+        status.expires_in_ticks.to_le_bytes()[1],
+        u8::from(status.lockout_active),
+        status.lockout_role as u8,
+    ]
+}
+
+#[must_use]
 pub fn encode_transition_result_payload(result: TransitionResult) -> [u8; 9] {
     let transition_id = result.transition_id.to_le_bytes();
     let revision = result.revision_counter.to_le_bytes();
@@ -276,6 +328,63 @@ pub fn decode_transition_request(payload: &[u8], marker: u8) -> Result<u32, Stat
     Ok(u32::from_le_bytes([
         payload[0], payload[1], payload[2], payload[3],
     ]))
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the auth completion payload is malformed.
+pub fn decode_complete_authentication_request(
+    payload: &[u8],
+) -> Result<(u32, u32, &[u8]), StatusCode> {
+    if payload.len() < 9 {
+        return Err(StatusCode::ValidationError);
+    }
+    let challenge_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    let request_counter = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+    let proof_len = usize::from(payload[8]);
+    if proof_len == 0 || payload.len() != 9 + proof_len {
+        return Err(StatusCode::ValidationError);
+    }
+    Ok((challenge_id, request_counter, &payload[9..]))
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the auth role is malformed or unsupported.
+pub fn decode_authentication_role(payload: &[u8]) -> Result<AuthorityRole, StatusCode> {
+    if payload.len() != 1 {
+        return Err(StatusCode::ValidationError);
+    }
+    match payload[0] {
+        0x02 => Ok(AuthorityRole::Bootstrap),
+        0x03 => Ok(AuthorityRole::Administrator),
+        0x04 => Ok(AuthorityRole::Recovery),
+        0x06 => Ok(AuthorityRole::KeyManager),
+        _ => Err(StatusCode::ValidationError),
+    }
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when a privileged payload does not contain
+/// a session id, a request counter, and a bounded inner payload.
+pub fn decode_authorized_payload(
+    payload: &[u8],
+    min_inner_len: usize,
+    max_inner_len: usize,
+) -> Result<(u32, u32, &[u8]), StatusCode> {
+    if payload.len() < 8 {
+        return Err(StatusCode::ValidationError);
+    }
+    let inner = &payload[8..];
+    if inner.len() < min_inner_len || inner.len() > max_inner_len {
+        return Err(StatusCode::ValidationError);
+    }
+    Ok((
+        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
+        u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]),
+        inner,
+    ))
 }
 
 /// # Errors

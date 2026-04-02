@@ -6,6 +6,9 @@ use super::command::{CommandDefinition, ReplayPolicy};
 pub const RECORD_VERSION: u8 = 1;
 pub const MAX_OWNER_ID_LEN: usize = 16;
 pub const MAX_AUTH_SNAPSHOT_LEN: usize = 16;
+pub const MAX_ROLE_VERIFIER_LEN: usize = 8;
+pub const MAX_CHALLENGE_NONCE_LEN: usize = 8;
+pub const MAX_FAILURE_COUNTERS: usize = 4;
 pub const ZEROIZE_COMPLETION_FLAGS: u8 = 0x0f;
 pub const DEVELOPER_RESET_COMPLETION_FLAGS: u8 = 0x07;
 pub const MAX_PERSISTENT_KEYS: usize = 8;
@@ -60,6 +63,7 @@ pub enum SessionState {
     Administrator = 0x03,
     Recovery = 0x04,
     Developer = 0x05,
+    KeyManager = 0x06,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +99,171 @@ pub enum AuthorizationMode {
     BootstrapProof = 0x02,
     AdministratorProof = 0x03,
     RecoveryProof = 0x04,
+    KeyManagerProof = 0x05,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CredentialKind {
+    Marker = 0x01,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SessionLifecycleState {
+    Inactive = 0x00,
+    Pending = 0x01,
+    Active = 0x02,
+    Expired = 0x03,
+    Invalidated = 0x04,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CredentialRecord {
+    pub role: AuthorityRole,
+    pub credential_kind: CredentialKind,
+    pub verifier_bytes: Vec<u8, MAX_ROLE_VERIFIER_LEN>,
+    pub enabled: bool,
+    pub session_timeout_ticks: u16,
+    pub max_failures: u8,
+    pub lockout_ticks: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthenticationChallenge {
+    pub challenge_id: u32,
+    pub requested_role: AuthorityRole,
+    pub nonce: Vec<u8, MAX_CHALLENGE_NONCE_LEN>,
+    pub expires_at_tick: u32,
+    pub request_counter_floor: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionRecord {
+    pub session_id: u32,
+    pub role: AuthorityRole,
+    pub state: SessionLifecycleState,
+    pub issued_at_revision: u32,
+    pub expires_at_tick: u32,
+    pub last_counter: u32,
+    pub last_activity_tick: u32,
+    pub authorization_mode: AuthorizationMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AccessFailureCounter {
+    pub role: AuthorityRole,
+    pub consecutive_failures: u8,
+    pub locked_until_tick: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionStatus {
+    pub session_present: bool,
+    pub active_role: AuthorityRole,
+    pub expires_in_ticks: u16,
+    pub lockout_active: bool,
+    pub lockout_role: AuthorityRole,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthSnapshot {
+    pub credentials: Vec<CredentialRecord, MAX_FAILURE_COUNTERS>,
+    pub failure_counters: Vec<AccessFailureCounter, MAX_FAILURE_COUNTERS>,
+    pub next_challenge_id: u32,
+    pub next_session_id: u32,
+}
+
+impl Default for AuthSnapshot {
+    fn default() -> Self {
+        let mut credentials = Vec::<CredentialRecord, MAX_FAILURE_COUNTERS>::new();
+        let _ = credentials.push(CredentialRecord::new(
+            AuthorityRole::Bootstrap,
+            b"BOOT",
+            8,
+            3,
+            5,
+        ));
+        let _ = credentials.push(CredentialRecord::new(
+            AuthorityRole::Administrator,
+            b"ADMIN",
+            8,
+            3,
+            5,
+        ));
+        let _ = credentials.push(CredentialRecord::new(
+            AuthorityRole::Recovery,
+            b"RECVR",
+            8,
+            3,
+            5,
+        ));
+        let _ = credentials.push(CredentialRecord::new(
+            AuthorityRole::KeyManager,
+            b"KEYMG",
+            8,
+            3,
+            5,
+        ));
+
+        let mut failure_counters = Vec::<AccessFailureCounter, MAX_FAILURE_COUNTERS>::new();
+        let _ = failure_counters.push(AccessFailureCounter::new(AuthorityRole::Bootstrap));
+        let _ = failure_counters.push(AccessFailureCounter::new(AuthorityRole::Administrator));
+        let _ = failure_counters.push(AccessFailureCounter::new(AuthorityRole::Recovery));
+        let _ = failure_counters.push(AccessFailureCounter::new(AuthorityRole::KeyManager));
+
+        Self {
+            credentials,
+            failure_counters,
+            next_challenge_id: 1,
+            next_session_id: 1,
+        }
+    }
+}
+
+impl CredentialRecord {
+    #[must_use]
+    pub fn new(
+        role: AuthorityRole,
+        verifier: &[u8],
+        session_timeout_ticks: u16,
+        max_failures: u8,
+        lockout_ticks: u16,
+    ) -> Self {
+        let mut verifier_bytes = Vec::<u8, MAX_ROLE_VERIFIER_LEN>::new();
+        let _ = verifier_bytes.extend_from_slice(verifier);
+        Self {
+            role,
+            credential_kind: CredentialKind::Marker,
+            verifier_bytes,
+            enabled: true,
+            session_timeout_ticks,
+            max_failures,
+            lockout_ticks,
+        }
+    }
+
+    #[must_use]
+    pub fn allows_state(&self, device_state: DeviceState) -> bool {
+        match self.role {
+            AuthorityRole::Bootstrap => matches!(device_state, DeviceState::Factory | DeviceState::Zeroized),
+            AuthorityRole::Administrator => matches!(device_state, DeviceState::Operational | DeviceState::Locked),
+            AuthorityRole::Recovery => matches!(device_state, DeviceState::Locked | DeviceState::Recovery),
+            AuthorityRole::KeyManager => matches!(device_state, DeviceState::Operational),
+            AuthorityRole::Public | AuthorityRole::Developer => false,
+        }
+    }
+}
+
+impl AccessFailureCounter {
+    #[must_use]
+    pub const fn new(role: AuthorityRole) -> Self {
+        Self {
+            role,
+            consecutive_failures: 0,
+            locked_until_tick: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1411,6 +1580,197 @@ pub const fn developer_mode_session() -> SessionState {
 }
 
 #[must_use]
+pub const fn role_to_session_state(role: AuthorityRole) -> SessionState {
+    match role {
+        AuthorityRole::Public => SessionState::Unauthenticated,
+        AuthorityRole::Bootstrap => SessionState::Bootstrap,
+        AuthorityRole::Administrator => SessionState::Administrator,
+        AuthorityRole::Recovery => SessionState::Recovery,
+        AuthorityRole::Developer => SessionState::Developer,
+        AuthorityRole::KeyManager => SessionState::KeyManager,
+    }
+}
+
+#[must_use]
+pub const fn role_to_authorization_mode(role: AuthorityRole) -> AuthorizationMode {
+    match role {
+        AuthorityRole::Public => AuthorizationMode::None,
+        AuthorityRole::Bootstrap => AuthorizationMode::BootstrapProof,
+        AuthorityRole::Administrator => AuthorizationMode::AdministratorProof,
+        AuthorityRole::Recovery => AuthorizationMode::RecoveryProof,
+        AuthorityRole::Developer => AuthorizationMode::DeveloperMode,
+        AuthorityRole::KeyManager => AuthorizationMode::KeyManagerProof,
+    }
+}
+
+#[must_use]
+pub fn current_session_state(
+    active_session: Option<SessionRecord>,
+    developer_mode: bool,
+) -> SessionState {
+    if let Some(session) = active_session
+        && session.state == SessionLifecycleState::Active
+    {
+        return role_to_session_state(session.role);
+    }
+    if developer_mode {
+        SessionState::Developer
+    } else {
+        SessionState::Unauthenticated
+    }
+}
+
+#[must_use]
+pub fn current_session_status(
+    active_session: Option<SessionRecord>,
+    developer_mode: bool,
+    current_tick: u32,
+    failure_counters: &[AccessFailureCounter],
+) -> SessionStatus {
+    let (session_present, active_role, expires_in_ticks) =
+        if let Some(session) = active_session.filter(|session| session.state == SessionLifecycleState::Active)
+        {
+            (
+                true,
+                session.role,
+                u16::try_from(session.expires_at_tick.saturating_sub(current_tick))
+                    .unwrap_or(u16::MAX),
+            )
+        } else {
+            (
+                false,
+                if developer_mode {
+                    AuthorityRole::Developer
+                } else {
+                    AuthorityRole::Public
+                },
+                0,
+            )
+        };
+
+    let mut lockout_active = false;
+    let mut lockout_role = AuthorityRole::Public;
+    for counter in failure_counters {
+        if current_tick < counter.locked_until_tick {
+            lockout_active = true;
+            lockout_role = counter.role;
+            break;
+        }
+    }
+
+    SessionStatus {
+        session_present,
+        active_role,
+        expires_in_ticks,
+        lockout_active,
+        lockout_role,
+    }
+}
+
+#[must_use]
+pub fn issue_challenge_nonce(
+    role: AuthorityRole,
+    challenge_id: u32,
+    revision: u32,
+) -> Vec<u8, MAX_CHALLENGE_NONCE_LEN> {
+    let mut nonce = Vec::<u8, MAX_CHALLENGE_NONCE_LEN>::new();
+    let _ = nonce.push(role as u8);
+    let _ = nonce.extend_from_slice(&challenge_id.to_le_bytes());
+    let _ = nonce.extend_from_slice(&revision.to_le_bytes()[..3]);
+    nonce
+}
+
+pub fn clear_challenge(challenge: &mut Option<AuthenticationChallenge>) {
+    if let Some(challenge) = challenge.as_mut() {
+        for byte in &mut challenge.nonce {
+            *byte = 0;
+        }
+        challenge.nonce.clear();
+    }
+    *challenge = None;
+}
+
+pub fn clear_active_session(active_session: &mut Option<SessionRecord>) {
+    *active_session = None;
+}
+
+pub fn clear_failure_counters(failure_counters: &mut Vec<AccessFailureCounter, MAX_FAILURE_COUNTERS>) {
+    for counter in failure_counters {
+        counter.consecutive_failures = 0;
+        counter.locked_until_tick = 0;
+    }
+}
+
+#[must_use]
+pub fn find_credential(
+    snapshot: &AuthSnapshot,
+    role: AuthorityRole,
+) -> Option<&CredentialRecord> {
+    snapshot.credentials.iter().find(|credential| credential.role == role)
+}
+
+pub fn find_failure_counter_mut(
+    snapshot: &mut AuthSnapshot,
+    role: AuthorityRole,
+) -> Option<&mut AccessFailureCounter> {
+    snapshot
+        .failure_counters
+        .iter_mut()
+        .find(|counter| counter.role == role)
+}
+
+pub fn record_auth_failure(
+    snapshot: &mut AuthSnapshot,
+    role: AuthorityRole,
+    current_tick: u32,
+) {
+    let Some(max_failures) = snapshot
+        .credentials
+        .iter()
+        .find(|credential| credential.role == role)
+        .map(|credential| credential.max_failures)
+    else {
+        return;
+    };
+    let lockout_ticks = snapshot
+        .credentials
+        .iter()
+        .find(|credential| credential.role == role)
+        .map_or(0, |credential| credential.lockout_ticks);
+    if let Some(counter) = find_failure_counter_mut(snapshot, role) {
+        counter.consecutive_failures = counter.consecutive_failures.saturating_add(1);
+        if counter.consecutive_failures >= max_failures {
+            counter.locked_until_tick = current_tick.saturating_add(u32::from(lockout_ticks));
+        }
+    }
+}
+
+pub fn clear_auth_failures(snapshot: &mut AuthSnapshot, role: AuthorityRole) {
+    if let Some(counter) = find_failure_counter_mut(snapshot, role) {
+        counter.consecutive_failures = 0;
+        counter.locked_until_tick = 0;
+    }
+}
+
+#[must_use]
+pub fn role_locked_out(snapshot: &AuthSnapshot, role: AuthorityRole, current_tick: u32) -> bool {
+    snapshot
+        .failure_counters
+        .iter()
+        .find(|counter| counter.role == role)
+        .is_some_and(|counter| current_tick < counter.locked_until_tick)
+}
+
+#[must_use]
+pub fn verify_marker_proof(
+    credential: &CredentialRecord,
+    proof_bytes: &[u8],
+) -> bool {
+    credential.verifier_bytes.as_slice() == proof_bytes
+}
+
+
+#[must_use]
 pub fn is_allowed_transition(source: DeviceState, target: DeviceState) -> bool {
     matches!(
         (source, target),
@@ -1459,14 +1819,17 @@ pub fn ensure_command_allowed(
             }
         }
         AuthorityRole::Developer => {
-            if !(developer_mode && session_state == SessionState::Developer) {
+            if !developer_mode {
                 return Err(StatusCode::AuthorizationError);
             }
         }
         AuthorityRole::KeyManager => {
             if !matches!(
                 session_state,
-                SessionState::Administrator | SessionState::Recovery | SessionState::Developer
+                SessionState::KeyManager
+                    | SessionState::Administrator
+                    | SessionState::Recovery
+                    | SessionState::Developer
             ) {
                 return Err(StatusCode::AuthorizationError);
             }

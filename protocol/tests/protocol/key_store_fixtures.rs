@@ -9,7 +9,7 @@ pub const USAGE_SIGN: u8 = 0x01;
 pub const USAGE_EXPORT: u8 = 0x80;
 
 pub fn operational_engine() -> ProtocolEngine {
-    ProtocolEngine::new(DeviceState::Operational, SessionState::Administrator)
+    ProtocolEngine::new(DeviceState::Operational, SessionState::KeyManager)
 }
 
 pub fn recovery_engine() -> ProtocolEngine {

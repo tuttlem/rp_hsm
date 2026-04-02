@@ -13,7 +13,7 @@ fn restricted_command_requires_authorization() {
     assert!(maybe_encoded.is_some());
     let encoded = maybe_encoded.unwrap_or_default();
     let response = engine.handle_bytes(&encoded);
-    assert_eq!(response.code, StatusCode::AuthorizationError.as_u8());
+    assert_eq!(response.code, StatusCode::ValidationError.as_u8());
 }
 
 #[test]
@@ -27,5 +27,8 @@ fn command_catalog_remains_available_when_locked() {
     let encoded = maybe_encoded.unwrap_or_default();
     let response = engine.handle_bytes(&encoded);
     assert_eq!(response.code, StatusCode::Success.as_u8());
-    assert_eq!(response.payload.as_slice(), &[5, 0x01, 0x02, 0x03, 0x04, 0x05]);
+    assert_eq!(
+        response.payload.as_slice(),
+        &[8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+    );
 }

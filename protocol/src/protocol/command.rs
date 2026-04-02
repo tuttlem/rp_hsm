@@ -1,9 +1,13 @@
 use super::state::{AuthorityRole, DeviceState, SessionState};
 
+pub const AUTH_HEADER_LEN: usize = 8;
+pub const MAX_AUTH_PROOF_LEN: usize = 8;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandFamily {
     Discovery,
     Status,
+    Authentication,
     Lifecycle,
     KeyStore,
 }
@@ -16,6 +20,10 @@ pub enum CommandId {
     GetCommandCatalog = 0x03,
     GetLifecycleStatus = 0x04,
     GetKeyStoreStatus = 0x05,
+    BeginAuthentication = 0x06,
+    CompleteAuthentication = 0x07,
+    GetSessionStatus = 0x08,
+    InvalidateSession = 0x09,
     BeginProvisioning = 0x80,
     FinalizeProvisioning = 0x81,
     LockDevice = 0x82,
@@ -43,6 +51,10 @@ impl CommandId {
             0x03 => Some(Self::GetCommandCatalog),
             0x04 => Some(Self::GetLifecycleStatus),
             0x05 => Some(Self::GetKeyStoreStatus),
+            0x06 => Some(Self::BeginAuthentication),
+            0x07 => Some(Self::CompleteAuthentication),
+            0x08 => Some(Self::GetSessionStatus),
+            0x09 => Some(Self::InvalidateSession),
             0x80 => Some(Self::BeginProvisioning),
             0x81 => Some(Self::FinalizeProvisioning),
             0x82 => Some(Self::LockDevice),
@@ -180,11 +192,63 @@ pub const GET_KEY_STORE_STATUS: CommandDefinition = CommandDefinition {
     developer_only: false,
 };
 
+pub const BEGIN_AUTHENTICATION: CommandDefinition = CommandDefinition {
+    id: CommandId::BeginAuthentication,
+    family: CommandFamily::Authentication,
+    min_payload_len: 1,
+    max_payload_len: 1,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Public,
+    replay_policy: ReplayPolicy::Repeatable,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const COMPLETE_AUTHENTICATION: CommandDefinition = CommandDefinition {
+    id: CommandId::CompleteAuthentication,
+    family: CommandFamily::Authentication,
+    min_payload_len: 9,
+    max_payload_len: 9 + MAX_AUTH_PROOF_LEN,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Public,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const GET_SESSION_STATUS: CommandDefinition = CommandDefinition {
+    id: CommandId::GetSessionStatus,
+    family: CommandFamily::Status,
+    min_payload_len: 0,
+    max_payload_len: 0,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Public,
+    replay_policy: ReplayPolicy::Repeatable,
+    idempotency_policy: IdempotencyPolicy::Idempotent,
+    enabled: true,
+    developer_only: false,
+};
+
+pub const INVALIDATE_SESSION: CommandDefinition = CommandDefinition {
+    id: CommandId::InvalidateSession,
+    family: CommandFamily::Authentication,
+    min_payload_len: AUTH_HEADER_LEN,
+    max_payload_len: AUTH_HEADER_LEN,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Public,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+};
+
 pub const BEGIN_PROVISIONING: CommandDefinition = CommandDefinition {
     id: CommandId::BeginProvisioning,
     family: CommandFamily::Lifecycle,
-    min_payload_len: 1,
-    max_payload_len: 16,
+    min_payload_len: AUTH_HEADER_LEN + 1,
+    max_payload_len: AUTH_HEADER_LEN + 16,
     allowed_device_states: FACTORY_OR_ZEROIZED,
     required_role: AuthorityRole::Bootstrap,
     replay_policy: ReplayPolicy::SingleUse,
@@ -196,8 +260,8 @@ pub const BEGIN_PROVISIONING: CommandDefinition = CommandDefinition {
 pub const FINALIZE_PROVISIONING: CommandDefinition = CommandDefinition {
     id: CommandId::FinalizeProvisioning,
     family: CommandFamily::Lifecycle,
-    min_payload_len: 5,
-    max_payload_len: 5,
+    min_payload_len: AUTH_HEADER_LEN + 5,
+    max_payload_len: AUTH_HEADER_LEN + 5,
     allowed_device_states: PROVISIONED_ONLY,
     required_role: AuthorityRole::Bootstrap,
     replay_policy: ReplayPolicy::SingleUse,
@@ -209,8 +273,8 @@ pub const FINALIZE_PROVISIONING: CommandDefinition = CommandDefinition {
 pub const LOCK_DEVICE: CommandDefinition = CommandDefinition {
     id: CommandId::LockDevice,
     family: CommandFamily::Lifecycle,
-    min_payload_len: 1,
-    max_payload_len: 1,
+    min_payload_len: AUTH_HEADER_LEN + 1,
+    max_payload_len: AUTH_HEADER_LEN + 1,
     allowed_device_states: OPERATIONAL_ONLY,
     required_role: AuthorityRole::Administrator,
     replay_policy: ReplayPolicy::SingleUse,
@@ -222,8 +286,8 @@ pub const LOCK_DEVICE: CommandDefinition = CommandDefinition {
 pub const UNLOCK_DEVICE: CommandDefinition = CommandDefinition {
     id: CommandId::UnlockDevice,
     family: CommandFamily::Lifecycle,
-    min_payload_len: 1,
-    max_payload_len: 1,
+    min_payload_len: AUTH_HEADER_LEN + 1,
+    max_payload_len: AUTH_HEADER_LEN + 1,
     allowed_device_states: LOCKED_ONLY,
     required_role: AuthorityRole::Administrator,
     replay_policy: ReplayPolicy::SingleUse,
@@ -235,8 +299,8 @@ pub const UNLOCK_DEVICE: CommandDefinition = CommandDefinition {
 pub const ENTER_RECOVERY: CommandDefinition = CommandDefinition {
     id: CommandId::EnterRecovery,
     family: CommandFamily::Lifecycle,
-    min_payload_len: 1,
-    max_payload_len: 1,
+    min_payload_len: AUTH_HEADER_LEN + 1,
+    max_payload_len: AUTH_HEADER_LEN + 1,
     allowed_device_states: LOCKED_ONLY,
     required_role: AuthorityRole::Recovery,
     replay_policy: ReplayPolicy::SingleUse,
@@ -248,8 +312,8 @@ pub const ENTER_RECOVERY: CommandDefinition = CommandDefinition {
 pub const RECOVER_TO_PROVISIONED: CommandDefinition = CommandDefinition {
     id: CommandId::RecoverToProvisioned,
     family: CommandFamily::Lifecycle,
-    min_payload_len: 1,
-    max_payload_len: 1,
+    min_payload_len: AUTH_HEADER_LEN + 1,
+    max_payload_len: AUTH_HEADER_LEN + 1,
     allowed_device_states: RECOVERY_ONLY,
     required_role: AuthorityRole::Recovery,
     replay_policy: ReplayPolicy::SingleUse,
@@ -261,8 +325,8 @@ pub const RECOVER_TO_PROVISIONED: CommandDefinition = CommandDefinition {
 pub const REACTIVATE_RECOVERED_PROVISIONING: CommandDefinition = CommandDefinition {
     id: CommandId::ReactivateRecoveredProvisioning,
     family: CommandFamily::Lifecycle,
-    min_payload_len: 5,
-    max_payload_len: 5,
+    min_payload_len: AUTH_HEADER_LEN + 5,
+    max_payload_len: AUTH_HEADER_LEN + 5,
     allowed_device_states: PROVISIONED_ONLY,
     required_role: AuthorityRole::Recovery,
     replay_policy: ReplayPolicy::SingleUse,
@@ -274,8 +338,8 @@ pub const REACTIVATE_RECOVERED_PROVISIONING: CommandDefinition = CommandDefiniti
 pub const EXECUTE_ZEROIZE: CommandDefinition = CommandDefinition {
     id: CommandId::ExecuteZeroize,
     family: CommandFamily::Lifecycle,
-    min_payload_len: 2,
-    max_payload_len: 2,
+    min_payload_len: AUTH_HEADER_LEN + 2,
+    max_payload_len: AUTH_HEADER_LEN + 2,
     allowed_device_states: ZEROIZE_ALLOWED,
     required_role: AuthorityRole::Administrator,
     replay_policy: ReplayPolicy::SingleUse,
@@ -300,10 +364,10 @@ pub const DEVELOPER_RESET_LIFECYCLE: CommandDefinition = CommandDefinition {
 pub const PUT_PERSISTENT_KEY: CommandDefinition = CommandDefinition {
     id: CommandId::PutPersistentKey,
     family: CommandFamily::KeyStore,
-    min_payload_len: 7,
-    max_payload_len: 30,
+    min_payload_len: AUTH_HEADER_LEN + 7,
+    max_payload_len: AUTH_HEADER_LEN + 30,
     allowed_device_states: OPERATIONAL_ONLY,
-    required_role: AuthorityRole::Administrator,
+    required_role: AuthorityRole::KeyManager,
     replay_policy: ReplayPolicy::SingleUse,
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
@@ -313,8 +377,8 @@ pub const PUT_PERSISTENT_KEY: CommandDefinition = CommandDefinition {
 pub const LIST_PERSISTENT_KEYS: CommandDefinition = CommandDefinition {
     id: CommandId::ListPersistentKeys,
     family: CommandFamily::KeyStore,
-    min_payload_len: 0,
-    max_payload_len: 0,
+    min_payload_len: AUTH_HEADER_LEN,
+    max_payload_len: AUTH_HEADER_LEN,
     allowed_device_states: KEY_QUERY_STATES,
     required_role: AuthorityRole::KeyManager,
     replay_policy: ReplayPolicy::Repeatable,
@@ -326,8 +390,8 @@ pub const LIST_PERSISTENT_KEYS: CommandDefinition = CommandDefinition {
 pub const GET_KEY_METADATA: CommandDefinition = CommandDefinition {
     id: CommandId::GetKeyMetadata,
     family: CommandFamily::KeyStore,
-    min_payload_len: 1,
-    max_payload_len: 1,
+    min_payload_len: AUTH_HEADER_LEN + 1,
+    max_payload_len: AUTH_HEADER_LEN + 1,
     allowed_device_states: KEY_QUERY_STATES,
     required_role: AuthorityRole::KeyManager,
     replay_policy: ReplayPolicy::Repeatable,
@@ -339,10 +403,10 @@ pub const GET_KEY_METADATA: CommandDefinition = CommandDefinition {
 pub const REVOKE_PERSISTENT_KEY: CommandDefinition = CommandDefinition {
     id: CommandId::RevokePersistentKey,
     family: CommandFamily::KeyStore,
-    min_payload_len: 2,
-    max_payload_len: 2,
+    min_payload_len: AUTH_HEADER_LEN + 2,
+    max_payload_len: AUTH_HEADER_LEN + 2,
     allowed_device_states: OPERATIONAL_ONLY,
-    required_role: AuthorityRole::Administrator,
+    required_role: AuthorityRole::KeyManager,
     replay_policy: ReplayPolicy::SingleUse,
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
@@ -352,8 +416,8 @@ pub const REVOKE_PERSISTENT_KEY: CommandDefinition = CommandDefinition {
 pub const DESTROY_PERSISTENT_KEY: CommandDefinition = CommandDefinition {
     id: CommandId::DestroyPersistentKey,
     family: CommandFamily::KeyStore,
-    min_payload_len: 3,
-    max_payload_len: 3,
+    min_payload_len: AUTH_HEADER_LEN + 3,
+    max_payload_len: AUTH_HEADER_LEN + 3,
     allowed_device_states: KEY_QUERY_STATES,
     required_role: AuthorityRole::KeyManager,
     replay_policy: ReplayPolicy::SingleUse,
@@ -394,28 +458,9 @@ pub const PUBLIC_COMMANDS: &[CommandDefinition] = &[
     GET_COMMAND_CATALOG,
     GET_LIFECYCLE_STATUS,
     GET_KEY_STORE_STATUS,
-];
-
-pub const RESTRICTED_COMMANDS: &[CommandDefinition] = &[
-    BEGIN_PROVISIONING,
-    FINALIZE_PROVISIONING,
-    LOCK_DEVICE,
-    UNLOCK_DEVICE,
-    ENTER_RECOVERY,
-    RECOVER_TO_PROVISIONED,
-    REACTIVATE_RECOVERED_PROVISIONING,
-    EXECUTE_ZEROIZE,
-    PUT_PERSISTENT_KEY,
-    LIST_PERSISTENT_KEYS,
-    GET_KEY_METADATA,
-    REVOKE_PERSISTENT_KEY,
-    DESTROY_PERSISTENT_KEY,
-];
-
-pub const DEVELOPER_COMMANDS: &[CommandDefinition] = &[
-    DEVELOPER_RESET_LIFECYCLE,
-    DEVELOPER_STORE_FAULT,
-    DEVELOPER_REBOOT,
+    BEGIN_AUTHENTICATION,
+    COMPLETE_AUTHENTICATION,
+    GET_SESSION_STATUS,
 ];
 
 pub fn lookup_command(id: u8) -> Option<CommandDefinition> {
@@ -430,6 +475,10 @@ pub fn definition_for(id: CommandId) -> CommandDefinition {
         CommandId::GetCommandCatalog => GET_COMMAND_CATALOG,
         CommandId::GetLifecycleStatus => GET_LIFECYCLE_STATUS,
         CommandId::GetKeyStoreStatus => GET_KEY_STORE_STATUS,
+        CommandId::BeginAuthentication => BEGIN_AUTHENTICATION,
+        CommandId::CompleteAuthentication => COMPLETE_AUTHENTICATION,
+        CommandId::GetSessionStatus => GET_SESSION_STATUS,
+        CommandId::InvalidateSession => INVALIDATE_SESSION,
         CommandId::BeginProvisioning => BEGIN_PROVISIONING,
         CommandId::FinalizeProvisioning => FINALIZE_PROVISIONING,
         CommandId::LockDevice => LOCK_DEVICE,
@@ -454,68 +503,97 @@ pub fn get_public_catalog() -> &'static [CommandDefinition] {
     PUBLIC_COMMANDS
 }
 
+fn public_and(extra: &'static [CommandDefinition]) -> &'static [CommandDefinition] {
+    extra
+}
+
 #[must_use]
 pub fn get_visible_catalog(
     session_state: SessionState,
     include_restricted: bool,
     developer_mode: bool,
 ) -> &'static [CommandDefinition] {
-    if include_restricted
-        && matches!(
-            session_state,
-            SessionState::Bootstrap
-                | SessionState::Administrator
-                | SessionState::Recovery
-                | SessionState::Developer
-        )
-    {
-        if developer_mode && session_state == SessionState::Developer {
-            &[
-                GET_PROTOCOL_VERSION,
-                GET_DEVICE_STATUS,
-                GET_COMMAND_CATALOG,
-                GET_LIFECYCLE_STATUS,
-                GET_KEY_STORE_STATUS,
-                BEGIN_PROVISIONING,
-                FINALIZE_PROVISIONING,
-                LOCK_DEVICE,
-                UNLOCK_DEVICE,
-                ENTER_RECOVERY,
-                RECOVER_TO_PROVISIONED,
-                REACTIVATE_RECOVERED_PROVISIONING,
-                EXECUTE_ZEROIZE,
-                PUT_PERSISTENT_KEY,
-                LIST_PERSISTENT_KEYS,
-                GET_KEY_METADATA,
-                REVOKE_PERSISTENT_KEY,
-                DESTROY_PERSISTENT_KEY,
-                DEVELOPER_RESET_LIFECYCLE,
-                DEVELOPER_STORE_FAULT,
-                DEVELOPER_REBOOT,
-            ]
-        } else {
-            &[
-                GET_PROTOCOL_VERSION,
-                GET_DEVICE_STATUS,
-                GET_COMMAND_CATALOG,
-                GET_LIFECYCLE_STATUS,
-                GET_KEY_STORE_STATUS,
-                BEGIN_PROVISIONING,
-                FINALIZE_PROVISIONING,
-                LOCK_DEVICE,
-                UNLOCK_DEVICE,
-                ENTER_RECOVERY,
-                RECOVER_TO_PROVISIONED,
-                REACTIVATE_RECOVERED_PROVISIONING,
-                EXECUTE_ZEROIZE,
-                PUT_PERSISTENT_KEY,
-                LIST_PERSISTENT_KEYS,
-                GET_KEY_METADATA,
-                REVOKE_PERSISTENT_KEY,
-                DESTROY_PERSISTENT_KEY,
-            ]
+    if !include_restricted {
+        return PUBLIC_COMMANDS;
+    }
+
+    match session_state {
+        SessionState::Unauthenticated => PUBLIC_COMMANDS,
+        SessionState::Bootstrap => public_and(&[
+            GET_PROTOCOL_VERSION,
+            GET_DEVICE_STATUS,
+            GET_COMMAND_CATALOG,
+            GET_LIFECYCLE_STATUS,
+            GET_KEY_STORE_STATUS,
+            BEGIN_AUTHENTICATION,
+            COMPLETE_AUTHENTICATION,
+            GET_SESSION_STATUS,
+            INVALIDATE_SESSION,
+            BEGIN_PROVISIONING,
+            FINALIZE_PROVISIONING,
+        ]),
+        SessionState::Administrator => public_and(&[
+            GET_PROTOCOL_VERSION,
+            GET_DEVICE_STATUS,
+            GET_COMMAND_CATALOG,
+            GET_LIFECYCLE_STATUS,
+            GET_KEY_STORE_STATUS,
+            BEGIN_AUTHENTICATION,
+            COMPLETE_AUTHENTICATION,
+            GET_SESSION_STATUS,
+            INVALIDATE_SESSION,
+            LOCK_DEVICE,
+            UNLOCK_DEVICE,
+            EXECUTE_ZEROIZE,
+        ]),
+        SessionState::Recovery => public_and(&[
+            GET_PROTOCOL_VERSION,
+            GET_DEVICE_STATUS,
+            GET_COMMAND_CATALOG,
+            GET_LIFECYCLE_STATUS,
+            GET_KEY_STORE_STATUS,
+            BEGIN_AUTHENTICATION,
+            COMPLETE_AUTHENTICATION,
+            GET_SESSION_STATUS,
+            INVALIDATE_SESSION,
+            ENTER_RECOVERY,
+            RECOVER_TO_PROVISIONED,
+            REACTIVATE_RECOVERED_PROVISIONING,
+        ]),
+        SessionState::Developer => {
+            if developer_mode {
+                &[
+                    GET_PROTOCOL_VERSION,
+                    GET_DEVICE_STATUS,
+                    GET_COMMAND_CATALOG,
+                    GET_LIFECYCLE_STATUS,
+                    GET_KEY_STORE_STATUS,
+                    BEGIN_AUTHENTICATION,
+                    COMPLETE_AUTHENTICATION,
+                    GET_SESSION_STATUS,
+                    DEVELOPER_RESET_LIFECYCLE,
+                    DEVELOPER_STORE_FAULT,
+                    DEVELOPER_REBOOT,
+                ]
+            } else {
+                PUBLIC_COMMANDS
+            }
         }
-    } else {
-        PUBLIC_COMMANDS
+        SessionState::KeyManager => public_and(&[
+            GET_PROTOCOL_VERSION,
+            GET_DEVICE_STATUS,
+            GET_COMMAND_CATALOG,
+            GET_LIFECYCLE_STATUS,
+            GET_KEY_STORE_STATUS,
+            BEGIN_AUTHENTICATION,
+            COMPLETE_AUTHENTICATION,
+            GET_SESSION_STATUS,
+            INVALIDATE_SESSION,
+            PUT_PERSISTENT_KEY,
+            LIST_PERSISTENT_KEYS,
+            GET_KEY_METADATA,
+            REVOKE_PERSISTENT_KEY,
+            DESTROY_PERSISTENT_KEY,
+        ]),
     }
 }

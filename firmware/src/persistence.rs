@@ -3,10 +3,10 @@ use core::slice;
 use critical_section::with;
 use heapless::Vec;
 use protocol::protocol::{
-    AuthorityRole, DeveloperStoreFaultAction, DeviceState, ExportPolicy, KeyAlgorithm,
-    KeyLifecycleState, KeyMetadata, KeyOrigin, KeyStoreRecord, KeyStoreSnapshot,
-    MAX_KEY_JOURNAL_RECORDS, MAX_KEY_MATERIAL_LEN, ProvisioningSnapshot, RecoveryPolicy,
-    TransitionIntent, TransitionType,
+    AuthSnapshot, AuthorityRole, CredentialKind, CredentialRecord, DeveloperStoreFaultAction,
+    DeviceState, ExportPolicy, KeyAlgorithm, KeyLifecycleState, KeyMetadata, KeyOrigin,
+    KeyStoreRecord, KeyStoreSnapshot, MAX_KEY_JOURNAL_RECORDS, MAX_KEY_MATERIAL_LEN,
+    ProvisioningSnapshot, RecoveryPolicy, TransitionIntent, TransitionType,
 };
 use protocol::protocol::state::{
     AuthorizationMode, FreshnessAnchor, KeyMaterialEnvelope, LifecycleState, MaterialEncoding,
@@ -30,6 +30,7 @@ unsafe extern "C" {
 pub struct PersistedState {
     pub provisioning: ProvisioningSnapshot,
     pub key_store: KeyStoreSnapshot,
+    pub auth: AuthSnapshot,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -191,6 +192,7 @@ pub fn corrupted_recovery_state() -> PersistedState {
             journal,
             anchor,
         },
+        auth: AuthSnapshot::default(),
     }
 }
 
@@ -314,7 +316,8 @@ fn encode_state(
     out: &mut Vec<u8, PAYLOAD_CAPACITY>,
 ) -> Result<(), PersistenceError> {
     encode_provisioning(&state.provisioning, out)?;
-    encode_key_store(&state.key_store, out)
+    encode_key_store(&state.key_store, out)?;
+    encode_auth_snapshot(&state.auth, out)
 }
 
 fn encode_provisioning(
@@ -379,6 +382,39 @@ fn encode_key_store(
     Ok(())
 }
 
+fn encode_auth_snapshot(
+    snapshot: &AuthSnapshot,
+    out: &mut Vec<u8, PAYLOAD_CAPACITY>,
+) -> Result<(), PersistenceError> {
+    push_u8(
+        out,
+        u8::try_from(snapshot.credentials.len()).map_err(|_| PersistenceError::EncodeOverflow)?,
+    )?;
+    for credential in &snapshot.credentials {
+        push_u8(out, credential.role as u8)?;
+        push_u8(out, credential.credential_kind as u8)?;
+        push_vec(out, &credential.verifier_bytes)?;
+        push_u8(out, u8::from(credential.enabled))?;
+        push_u8(out, credential.session_timeout_ticks.to_le_bytes()[0])?;
+        push_u8(out, credential.session_timeout_ticks.to_le_bytes()[1])?;
+        push_u8(out, credential.max_failures)?;
+        push_u8(out, credential.lockout_ticks.to_le_bytes()[0])?;
+        push_u8(out, credential.lockout_ticks.to_le_bytes()[1])?;
+    }
+    push_u8(
+        out,
+        u8::try_from(snapshot.failure_counters.len())
+            .map_err(|_| PersistenceError::EncodeOverflow)?,
+    )?;
+    for counter in &snapshot.failure_counters {
+        push_u8(out, counter.role as u8)?;
+        push_u8(out, counter.consecutive_failures)?;
+        push_u32(out, counter.locked_until_tick)?;
+    }
+    push_u32(out, snapshot.next_challenge_id)?;
+    push_u32(out, snapshot.next_session_id)
+}
+
 fn push_transition(
     transition: &TransitionIntent,
     out: &mut Vec<u8, PAYLOAD_CAPACITY>,
@@ -417,12 +453,14 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, PersistenceError> {
     let mut cursor = Cursor::new(bytes);
     let provisioning = decode_provisioning(&mut cursor)?;
     let key_store = decode_key_store(&mut cursor)?;
+    let auth = decode_auth_snapshot(&mut cursor)?;
     if !cursor.is_at_end() {
         return Err(PersistenceError::DecodeFailure);
     }
     Ok(PersistedState {
         provisioning,
         key_store,
+        auth,
     })
 }
 
@@ -536,6 +574,50 @@ fn decode_key_store(cursor: &mut Cursor<'_>) -> Result<KeyStoreSnapshot, Persist
     Ok(KeyStoreSnapshot { journal, anchor })
 }
 
+fn decode_auth_snapshot(cursor: &mut Cursor<'_>) -> Result<AuthSnapshot, PersistenceError> {
+    let credential_len = usize::from(cursor.read_u8()?);
+    let mut credentials = Vec::new();
+    for _ in 0..credential_len {
+        let role = decode_authority_role(cursor.read_u8()?)?;
+        let credential_kind = decode_credential_kind(cursor.read_u8()?)?;
+        let verifier_bytes = cursor.read_vec()?;
+        let enabled = cursor.read_u8()? != 0;
+        let session_timeout_ticks = u16::from_le_bytes([cursor.read_u8()?, cursor.read_u8()?]);
+        let max_failures = cursor.read_u8()?;
+        let lockout_ticks = u16::from_le_bytes([cursor.read_u8()?, cursor.read_u8()?]);
+        credentials
+            .push(CredentialRecord {
+                role,
+                credential_kind,
+                verifier_bytes,
+                enabled,
+                session_timeout_ticks,
+                max_failures,
+                lockout_ticks,
+            })
+            .map_err(|_| PersistenceError::DecodeFailure)?;
+    }
+
+    let counter_len = usize::from(cursor.read_u8()?);
+    let mut failure_counters = Vec::new();
+    for _ in 0..counter_len {
+        failure_counters
+            .push(protocol::protocol::AccessFailureCounter {
+                role: decode_authority_role(cursor.read_u8()?)?,
+                consecutive_failures: cursor.read_u8()?,
+                locked_until_tick: cursor.read_u32()?,
+            })
+            .map_err(|_| PersistenceError::DecodeFailure)?;
+    }
+
+    Ok(AuthSnapshot {
+        credentials,
+        failure_counters,
+        next_challenge_id: cursor.read_u32()?,
+        next_session_id: cursor.read_u32()?,
+    })
+}
+
 fn decode_device_state(byte: u8) -> Result<DeviceState, PersistenceError> {
     match byte {
         0x01 => Ok(DeviceState::Factory),
@@ -567,6 +649,14 @@ fn decode_authorization_mode(byte: u8) -> Result<AuthorizationMode, PersistenceE
         0x02 => Ok(AuthorizationMode::BootstrapProof),
         0x03 => Ok(AuthorizationMode::AdministratorProof),
         0x04 => Ok(AuthorizationMode::RecoveryProof),
+        0x05 => Ok(AuthorizationMode::KeyManagerProof),
+        _ => Err(PersistenceError::DecodeFailure),
+    }
+}
+
+fn decode_credential_kind(byte: u8) -> Result<CredentialKind, PersistenceError> {
+    match byte {
+        0x01 => Ok(CredentialKind::Marker),
         _ => Err(PersistenceError::DecodeFailure),
     }
 }

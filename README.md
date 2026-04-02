@@ -103,29 +103,25 @@ cargo probe -- --help
 
 The probe expects a `developer-mode` firmware image and validates:
 
-1. protocol version and device status
-2. public and restricted command catalogs
-3. provisioning from `factory` to `operational`
-4. flash-backed persistent key-store retention across a developer-triggered reboot
-5. persistent key-store create, metadata, revoke, destroy, and full-store handling
-6. rollback-required and degraded store behavior via developer-only persisted-store fault injection
-7. developer-only lifecycle reset back to `factory`
-
-Catalog note:
-
-- The probe treats restricted command catalogs as membership-based unless a
-  feature contract explicitly requires stable ordering.
+1. protocol version and public command catalog shape
+2. developer-mode restricted catalog visibility for `DeveloperResetLifecycle`, `DeveloperStoreFault`, and `DeveloperReboot`
+3. unauthenticated denial of privileged commands
+4. bootstrap authentication and provisioning from `factory` to `operational`
+5. administrator authentication, lock, unlock, and immediate session invalidation
+6. key-manager authentication, persistent key operations, replay denial, and explicit logout
+7. session expiry after bounded inactivity
+8. repeated failed authentication attempts triggering lockout
+9. reboot-driven invalidation of active authenticated sessions
+10. developer-only lifecycle reset back to `factory`
 
 Important:
 
-- The firmware reserves the top 8 KiB of the configured 2 MiB flash image for
-  developer-mode persistent-state snapshots. That space is outside the linked
-  application image.
-- The probe now expects real flash-backed persistence, developer reboot, and
-  developer-only persisted-store fault controls to be present in the flashed
-  firmware image.
-- `cargo probe` is an on-device validation command. It will reboot the board
-  and intentionally inject rollback and corruption test states while it runs.
+- The firmware still reserves the top 8 KiB of the configured 2 MiB flash image
+  for developer-mode persistent-state snapshots. That space is outside the
+  linked application image.
+- `cargo probe` is an on-device validation command. It will mutate lifecycle
+  state, authenticate multiple reviewed roles, reboot the board once, and issue
+  a developer reset when cleanup is required.
 - The reserved persistent-state flash region is intentionally preserved across
   normal firmware reflashes. In `developer-mode`, the probe will issue a
   developer reset automatically if the device boots with previously persisted
