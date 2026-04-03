@@ -11,7 +11,7 @@ fn failed_sign_and_import_do_not_echo_secret_material() {
         &[0, 0, 0, 0, 1, 0, 0, 0, 0x01, 0x01, 0x04, 0x00, b't', b'e', b's', b't'],
     ).unwrap_or_default()).unwrap_or_default());
     assert_eq!(sign.code, StatusCode::AuthorizationError.as_u8());
-    assert!(sign.payload.is_empty());
+    assert_eq!(sign.payload.as_slice(), &[0x03]);
 
     let import = engine.handle_bytes(&encode_frame(&ProtocolFrame::new(
         MessageKind::Request,
@@ -19,7 +19,7 @@ fn failed_sign_and_import_do_not_echo_secret_material() {
         0x02,
         &[0, 0, 0, 0, 1, 0, 0, 0, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02, 0x00, 0xaa, 0xbb, 0x01, 0xcc],
     ).unwrap_or_default()).unwrap_or_default());
-    assert!(import.payload.is_empty());
+    assert_eq!(import.payload.as_slice(), &[0x03]);
 }
 
 #[test]

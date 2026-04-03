@@ -1,4 +1,4 @@
-use super::state::{AuthorityRole, DeviceState, SessionState};
+use super::state::{AuthorityRole, DeviceState, ProtectedActionClass, SessionState};
 
 pub const AUTH_HEADER_LEN: usize = 8;
 pub const MAX_AUTH_PROOF_LEN: usize = 8;
@@ -50,6 +50,7 @@ pub enum CommandId {
     Encrypt = 0x94,
     Decrypt = 0x95,
     DeriveSharedSecret = 0x96,
+    DeveloperSetPolicy = 0x97,
 }
 
 impl CommandId {
@@ -90,6 +91,7 @@ impl CommandId {
             0x94 => Some(Self::Encrypt),
             0x95 => Some(Self::Decrypt),
             0x96 => Some(Self::DeriveSharedSecret),
+            0x97 => Some(Self::DeveloperSetPolicy),
             _ => None,
         }
     }
@@ -119,6 +121,8 @@ pub struct CommandDefinition {
     pub idempotency_policy: IdempotencyPolicy,
     pub enabled: bool,
     pub developer_only: bool,
+    pub requires_key_context: bool,
+    pub protected_action_class: ProtectedActionClass,
 }
 
 const ALL_STATES: &[DeviceState] = &[
@@ -157,6 +161,8 @@ pub const GET_PROTOCOL_VERSION: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::Idempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const GET_DEVICE_STATUS: CommandDefinition = CommandDefinition {
@@ -170,6 +176,8 @@ pub const GET_DEVICE_STATUS: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::Idempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const GET_COMMAND_CATALOG: CommandDefinition = CommandDefinition {
@@ -183,6 +191,8 @@ pub const GET_COMMAND_CATALOG: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::Idempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const GET_LIFECYCLE_STATUS: CommandDefinition = CommandDefinition {
@@ -196,6 +206,8 @@ pub const GET_LIFECYCLE_STATUS: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::Idempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const GET_KEY_STORE_STATUS: CommandDefinition = CommandDefinition {
@@ -209,6 +221,8 @@ pub const GET_KEY_STORE_STATUS: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::Idempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const BEGIN_AUTHENTICATION: CommandDefinition = CommandDefinition {
@@ -222,6 +236,8 @@ pub const BEGIN_AUTHENTICATION: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const COMPLETE_AUTHENTICATION: CommandDefinition = CommandDefinition {
@@ -235,6 +251,8 @@ pub const COMPLETE_AUTHENTICATION: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const GET_SESSION_STATUS: CommandDefinition = CommandDefinition {
@@ -248,6 +266,8 @@ pub const GET_SESSION_STATUS: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::Idempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const INVALIDATE_SESSION: CommandDefinition = CommandDefinition {
@@ -261,6 +281,8 @@ pub const INVALIDATE_SESSION: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const GET_CRYPTO_CAPABILITIES: CommandDefinition = CommandDefinition {
@@ -274,6 +296,8 @@ pub const GET_CRYPTO_CAPABILITIES: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::Idempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const VERIFY_DETACHED: CommandDefinition = CommandDefinition {
@@ -287,6 +311,8 @@ pub const VERIFY_DETACHED: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::Idempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const BEGIN_PROVISIONING: CommandDefinition = CommandDefinition {
@@ -300,6 +326,8 @@ pub const BEGIN_PROVISIONING: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const FINALIZE_PROVISIONING: CommandDefinition = CommandDefinition {
@@ -313,6 +341,8 @@ pub const FINALIZE_PROVISIONING: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const LOCK_DEVICE: CommandDefinition = CommandDefinition {
@@ -326,6 +356,8 @@ pub const LOCK_DEVICE: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const UNLOCK_DEVICE: CommandDefinition = CommandDefinition {
@@ -339,6 +371,8 @@ pub const UNLOCK_DEVICE: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::RecoveryTransition,
 };
 
 pub const ENTER_RECOVERY: CommandDefinition = CommandDefinition {
@@ -352,6 +386,8 @@ pub const ENTER_RECOVERY: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::RecoveryTransition,
 };
 
 pub const RECOVER_TO_PROVISIONED: CommandDefinition = CommandDefinition {
@@ -365,6 +401,8 @@ pub const RECOVER_TO_PROVISIONED: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::DestructiveAdmin,
 };
 
 pub const REACTIVATE_RECOVERED_PROVISIONING: CommandDefinition = CommandDefinition {
@@ -378,6 +416,8 @@ pub const REACTIVATE_RECOVERED_PROVISIONING: CommandDefinition = CommandDefiniti
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::RecoveryTransition,
 };
 
 pub const EXECUTE_ZEROIZE: CommandDefinition = CommandDefinition {
@@ -391,6 +431,8 @@ pub const EXECUTE_ZEROIZE: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::DestructiveAdmin,
 };
 
 pub const DEVELOPER_RESET_LIFECYCLE: CommandDefinition = CommandDefinition {
@@ -404,6 +446,8 @@ pub const DEVELOPER_RESET_LIFECYCLE: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: true,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const PUT_PERSISTENT_KEY: CommandDefinition = CommandDefinition {
@@ -417,6 +461,8 @@ pub const PUT_PERSISTENT_KEY: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: true,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const LIST_PERSISTENT_KEYS: CommandDefinition = CommandDefinition {
@@ -430,6 +476,8 @@ pub const LIST_PERSISTENT_KEYS: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::Idempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const GET_KEY_METADATA: CommandDefinition = CommandDefinition {
@@ -443,6 +491,8 @@ pub const GET_KEY_METADATA: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::Idempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: true,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const REVOKE_PERSISTENT_KEY: CommandDefinition = CommandDefinition {
@@ -456,6 +506,8 @@ pub const REVOKE_PERSISTENT_KEY: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: true,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const DESTROY_PERSISTENT_KEY: CommandDefinition = CommandDefinition {
@@ -469,6 +521,8 @@ pub const DESTROY_PERSISTENT_KEY: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: true,
+    protected_action_class: ProtectedActionClass::DestructiveKey,
 };
 
 pub const DEVELOPER_STORE_FAULT: CommandDefinition = CommandDefinition {
@@ -482,6 +536,8 @@ pub const DEVELOPER_STORE_FAULT: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: true,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const DEVELOPER_REBOOT: CommandDefinition = CommandDefinition {
@@ -495,6 +551,23 @@ pub const DEVELOPER_REBOOT: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: true,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
+};
+
+pub const DEVELOPER_SET_POLICY: CommandDefinition = CommandDefinition {
+    id: CommandId::DeveloperSetPolicy,
+    family: CommandFamily::Lifecycle,
+    min_payload_len: 0,
+    max_payload_len: 1,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Developer,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: true,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const SIGN_DETACHED: CommandDefinition = CommandDefinition {
@@ -508,6 +581,8 @@ pub const SIGN_DETACHED: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: true,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const GENERATE_RANDOM: CommandDefinition = CommandDefinition {
@@ -521,6 +596,8 @@ pub const GENERATE_RANDOM: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const IMPORT_WRAPPED_KEY: CommandDefinition = CommandDefinition {
@@ -534,6 +611,8 @@ pub const IMPORT_WRAPPED_KEY: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: true,
     developer_only: false,
+    requires_key_context: true,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const EXPORT_WRAPPED_KEY: CommandDefinition = CommandDefinition {
@@ -547,6 +626,8 @@ pub const EXPORT_WRAPPED_KEY: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: false,
     developer_only: false,
+    requires_key_context: true,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const ENCRYPT: CommandDefinition = CommandDefinition {
@@ -560,6 +641,8 @@ pub const ENCRYPT: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: false,
     developer_only: false,
+    requires_key_context: true,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const DECRYPT: CommandDefinition = CommandDefinition {
@@ -573,6 +656,8 @@ pub const DECRYPT: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: false,
     developer_only: false,
+    requires_key_context: true,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const DERIVE_SHARED_SECRET: CommandDefinition = CommandDefinition {
@@ -586,6 +671,8 @@ pub const DERIVE_SHARED_SECRET: CommandDefinition = CommandDefinition {
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
     enabled: false,
     developer_only: false,
+    requires_key_context: true,
+    protected_action_class: ProtectedActionClass::None,
 };
 
 pub const PUBLIC_COMMANDS: &[CommandDefinition] = &[
@@ -635,6 +722,7 @@ pub fn definition_for(id: CommandId) -> CommandDefinition {
         CommandId::DestroyPersistentKey => DESTROY_PERSISTENT_KEY,
         CommandId::DeveloperStoreFault => DEVELOPER_STORE_FAULT,
         CommandId::DeveloperReboot => DEVELOPER_REBOOT,
+        CommandId::DeveloperSetPolicy => DEVELOPER_SET_POLICY,
         CommandId::SignDetached => SIGN_DETACHED,
         CommandId::GenerateRandom => GENERATE_RANDOM,
         CommandId::ImportWrappedKey => IMPORT_WRAPPED_KEY,

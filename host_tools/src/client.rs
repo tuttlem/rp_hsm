@@ -77,6 +77,7 @@ pub struct StatusReport {
     pub key_store_status: [u8; 5],
     pub session_status: [u8; 6],
     pub crypto_capabilities: Option<[u8; 10]>,
+    pub policy_profile: Option<[u8; 9]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,6 +100,11 @@ pub struct SessionContext {
 pub enum DeveloperFaultAction {
     CorruptPersistedStore = 0x01,
     RollbackPersistedStore = 0x02,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PolicyProfileUpdate {
+    pub dual_control_enabled: bool,
 }
 
 impl DeveloperFaultAction {
@@ -211,6 +217,19 @@ impl SerialBackend {
                 crypto.code
             )));
         };
+        let policy_request =
+            ProtocolFrame::new(MessageKind::Request, 0x97, 0x02, &[]).unwrap_or_default();
+        let policy = exchange_frame(&mut *port, &policy_request)?;
+        let policy_profile = if policy.code == StatusCode::Success.as_u8() {
+            Some(copy_array::<9>(policy.payload.as_slice())?)
+        } else if policy.code == StatusCode::CommandError.as_u8() {
+            None
+        } else {
+            return Err(CliError::invalid_response(format!(
+                "unexpected policy status {:02x}",
+                policy.code
+            )));
+        };
 
         Ok(StatusReport {
             device_path: self.config.port_name.clone(),
@@ -221,6 +240,7 @@ impl SerialBackend {
             key_store_status: copy_array::<5>(key_store.payload.as_slice())?,
             session_status: copy_array::<6>(session.payload.as_slice())?,
             crypto_capabilities,
+            policy_profile,
         })
     }
 
@@ -306,6 +326,28 @@ impl SerialBackend {
             ProtocolFrame::new(MessageKind::Request, 0x8e, 0x02, &[action as u8]).unwrap_or_default();
         let response = exchange_frame(&mut *port, &request)?;
         ensure_status(&response, StatusCode::Success)
+    }
+
+    /// # Errors
+    ///
+    /// Returns `CliError` when the connected firmware rejects the developer
+    /// policy request.
+    pub fn developer_set_policy(
+        &self,
+        update: PolicyProfileUpdate,
+    ) -> Result<[u8; 9], CliError> {
+        let mut port = open_port(&self.config)?;
+        let request = ProtocolFrame::new(
+            MessageKind::Request,
+            0x97,
+            0x02,
+            &[u8::from(update.dual_control_enabled)],
+        )
+        .unwrap_or_default();
+        let response = exchange_frame(&mut *port, &request)?;
+        ensure_status(&response, StatusCode::Success)?;
+        settle_after_flash_mutation();
+        copy_array::<9>(response.payload.as_slice())
     }
 
     /// # Errors
@@ -663,11 +705,12 @@ fn find_frame_in_buffer(buffer: &[u8]) -> Option<ProtocolFrame> {
 }
 
 fn ensure_status(frame: &ProtocolFrame, expected: StatusCode) -> Result<(), CliError> {
-    if frame.code == StatusCode::AuthorizationError.as_u8() {
-        return Err(CliError::auth("device denied the requested operation"));
-    }
-    if frame.code == StatusCode::CommandError.as_u8() {
-        return Err(CliError::unsupported("operation is unavailable on the connected firmware"));
+    if frame.code == StatusCode::AuthorizationError.as_u8()
+        || frame.code == StatusCode::CommandError.as_u8()
+        || frame.code == StatusCode::StateError.as_u8()
+        || frame.code == StatusCode::InternalError.as_u8()
+    {
+        return Err(map_policy_error(frame));
     }
     if frame.code != expected.as_u8() {
         return Err(CliError::failure(format!(
@@ -676,6 +719,56 @@ fn ensure_status(frame: &ProtocolFrame, expected: StatusCode) -> Result<(), CliE
         )));
     }
     Ok(())
+}
+
+fn map_policy_error(frame: &ProtocolFrame) -> CliError {
+    let denial = frame.payload.first().copied();
+    let ticket_id = frame
+        .payload
+        .get(1..5)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_le_bytes);
+    match (frame.code, denial, ticket_id) {
+        (code, Some(0x01), _) if code == StatusCode::CommandError.as_u8() => {
+            CliError::unsupported("operation is unavailable on the connected firmware")
+        }
+        (code, Some(0x02), _) if code == StatusCode::StateError.as_u8() => {
+            CliError::failure("device state does not permit the requested operation")
+        }
+        (code, Some(0x03), _) if code == StatusCode::AuthorizationError.as_u8() => {
+            CliError::auth("active role or session does not permit the requested operation")
+        }
+        (code, Some(0x04), _) if code == StatusCode::AuthorizationError.as_u8() => {
+            CliError::auth("managed-key policy denied the requested operation")
+        }
+        (code, Some(0x05), Some(ticket_id))
+            if code == StatusCode::AuthorizationError.as_u8() =>
+        {
+            CliError::auth(format!(
+                "additional approval is required before execution (ticket_id={ticket_id})"
+            ))
+        }
+        (code, Some(0x06), Some(ticket_id))
+            if code == StatusCode::AuthorizationError.as_u8() =>
+        {
+            CliError::auth(format!(
+                "approval is stale and must be restarted (ticket_id={ticket_id})"
+            ))
+        }
+        (code, Some(0x07), _) if code == StatusCode::InternalError.as_u8() => {
+            CliError::failure("device policy state is ambiguous and failed closed")
+        }
+        (code, _, _) if code == StatusCode::AuthorizationError.as_u8() => {
+            CliError::auth("device denied the requested operation")
+        }
+        (code, _, _) if code == StatusCode::CommandError.as_u8() => {
+            CliError::unsupported("operation is unavailable on the connected firmware")
+        }
+        (code, _, _) if code == StatusCode::StateError.as_u8() => {
+            CliError::failure("device state does not permit the requested operation")
+        }
+        _ => CliError::failure(format!("unexpected device status {:02x}", frame.code)),
+    }
 }
 
 fn first_payload_byte(frame: &ProtocolFrame) -> Result<u8, CliError> {

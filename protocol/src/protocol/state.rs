@@ -35,6 +35,12 @@ pub const SIGNATURE_ALGORITHM_FLAGS: u8 = 0x01;
 pub const VERIFY_ALGORITHM_FLAGS: u8 = 0x03;
 pub const USAGE_SIGN: u8 = 0x01;
 pub const USAGE_WRAP_IMPORT: u8 = 0x20;
+pub const POLICY_PROFILE_VERSION: u8 = 1;
+pub const PROTECTED_ACTION_EXECUTE_ZEROIZE: u16 = 0x0001;
+pub const PROTECTED_ACTION_DESTROY_KEY: u16 = 0x0002;
+pub const PROTECTED_ACTION_RECOVERY_TRANSITION: u16 = 0x0004;
+pub const MAX_APPROVAL_TICKETS: usize = 3;
+pub const APPROVAL_TICKET_EXPIRY_TICKS: u16 = 8;
 
 const FINALIZE_MARKER: u8 = 0xa5;
 const REACTIVATE_MARKER: u8 = 0xa6;
@@ -95,6 +101,132 @@ pub enum AuthorityRole {
     Recovery = 0x04,
     Developer = 0x05,
     KeyManager = 0x06,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DenialClass {
+    None = 0x00,
+    CommandUnavailable = 0x01,
+    StateDenied = 0x02,
+    RoleDenied = 0x03,
+    KeyPolicyDenied = 0x04,
+    ApprovalMissing = 0x05,
+    ApprovalStale = 0x06,
+    InternalPolicyError = 0x07,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ProtectedActionClass {
+    None = 0x00,
+    DestructiveAdmin = 0x01,
+    DestructiveKey = 0x02,
+    RecoveryTransition = 0x03,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ApprovalTargetBinding {
+    Device = 0x01,
+    KeyId = 0x02,
+    TransitionId = 0x03,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ApprovalTicketState {
+    Pending = 0x01,
+    Confirmed = 0x02,
+    Consumed = 0x03,
+    Invalidated = 0x04,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PolicyProfile {
+    pub profile_version: u8,
+    pub policy_revision: u32,
+    pub dual_control_enabled: bool,
+    pub protected_action_mask: u16,
+    pub developer_commands_visible: bool,
+}
+
+impl Default for PolicyProfile {
+    fn default() -> Self {
+        Self {
+            profile_version: POLICY_PROFILE_VERSION,
+            policy_revision: 1,
+            dual_control_enabled: false,
+            protected_action_mask: PROTECTED_ACTION_EXECUTE_ZEROIZE
+                | PROTECTED_ACTION_DESTROY_KEY
+                | PROTECTED_ACTION_RECOVERY_TRANSITION,
+            developer_commands_visible: false,
+        }
+    }
+}
+
+impl PolicyProfile {
+    #[must_use]
+    pub fn protects(self, action: ProtectedActionClass) -> bool {
+        let bit = match action {
+            ProtectedActionClass::None => return false,
+            ProtectedActionClass::DestructiveAdmin => PROTECTED_ACTION_EXECUTE_ZEROIZE,
+            ProtectedActionClass::DestructiveKey => PROTECTED_ACTION_DESTROY_KEY,
+            ProtectedActionClass::RecoveryTransition => PROTECTED_ACTION_RECOVERY_TRANSITION,
+        };
+        self.protected_action_mask & bit != 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApprovalTicket {
+    pub ticket_id: u32,
+    pub approval_class: ProtectedActionClass,
+    pub target_binding: ApprovalTargetBinding,
+    pub target_id: u32,
+    pub initiator_role: AuthorityRole,
+    pub confirmer_role: AuthorityRole,
+    pub initiator_session_id: u32,
+    pub policy_revision: u32,
+    pub device_revision: u32,
+    pub expires_at_tick: u32,
+    pub state: ApprovalTicketState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PolicyDecision {
+    pub decision: bool,
+    pub denial_class: DenialClass,
+    pub approval_ticket_id: Option<u32>,
+}
+
+impl PolicyDecision {
+    #[must_use]
+    pub const fn allow() -> Self {
+        Self {
+            decision: true,
+            denial_class: DenialClass::None,
+            approval_ticket_id: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn deny(denial_class: DenialClass) -> Self {
+        Self {
+            decision: false,
+            denial_class,
+            approval_ticket_id: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn deny_with_ticket(denial_class: DenialClass, ticket_id: u32) -> Self {
+        Self {
+            decision: false,
+            denial_class,
+            approval_ticket_id: Some(ticket_id),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2072,54 +2204,167 @@ pub fn ensure_command_allowed(
     session_state: SessionState,
     developer_mode: bool,
 ) -> Result<(), StatusCode> {
-    if !definition.allowed_device_states.contains(&device_state) {
-        return Err(StatusCode::StateError);
+    let decision = evaluate_command_policy(
+        definition,
+        device_state,
+        session_state,
+        developer_mode,
+        PolicyProfile::default(),
+    );
+    if decision.decision {
+        Ok(())
+    } else {
+        Err(status_for_denial_class(decision.denial_class))
+    }
+}
+
+#[must_use]
+pub fn evaluate_command_policy(
+    definition: CommandDefinition,
+    device_state: DeviceState,
+    session_state: SessionState,
+    developer_mode: bool,
+    profile: PolicyProfile,
+) -> PolicyDecision {
+    if !definition.enabled {
+        return PolicyDecision::deny(DenialClass::CommandUnavailable);
     }
 
     if definition.developer_only && !developer_mode {
-        return Err(StatusCode::CommandError);
+        return PolicyDecision::deny(DenialClass::CommandUnavailable);
     }
 
-    match definition.required_role {
-        AuthorityRole::Public => {}
+    if !definition.allowed_device_states.contains(&device_state) {
+        return PolicyDecision::deny(DenialClass::StateDenied);
+    }
+
+    let allowed = match definition.required_role {
+        AuthorityRole::Public => true,
         AuthorityRole::Bootstrap => {
-            if !matches!(session_state, SessionState::Bootstrap | SessionState::Developer) {
-                return Err(StatusCode::AuthorizationError);
-            }
+            matches!(session_state, SessionState::Bootstrap | SessionState::Developer)
         }
         AuthorityRole::Administrator => {
-            if !matches!(session_state, SessionState::Administrator | SessionState::Developer) {
-                return Err(StatusCode::AuthorizationError);
-            }
+            matches!(session_state, SessionState::Administrator | SessionState::Developer)
         }
         AuthorityRole::Recovery => {
-            if !matches!(session_state, SessionState::Recovery | SessionState::Developer) {
-                return Err(StatusCode::AuthorizationError);
-            }
+            matches!(session_state, SessionState::Recovery | SessionState::Developer)
         }
-        AuthorityRole::Developer => {
-            if !developer_mode {
-                return Err(StatusCode::AuthorizationError);
-            }
-        }
+        AuthorityRole::Developer => developer_mode,
         AuthorityRole::KeyManager => {
-            if !matches!(
-                session_state,
-                SessionState::KeyManager
-                    | SessionState::Administrator
-                    | SessionState::Recovery
-                    | SessionState::Developer
-            ) {
-                return Err(StatusCode::AuthorizationError);
-            }
+            matches!(session_state, SessionState::KeyManager | SessionState::Developer)
+        }
+    };
+
+    if !allowed {
+        return PolicyDecision::deny(DenialClass::RoleDenied);
+    }
+
+    if definition.developer_only && !profile.developer_commands_visible && !developer_mode {
+        return PolicyDecision::deny(DenialClass::CommandUnavailable);
+    }
+
+    PolicyDecision::allow()
+}
+
+#[must_use]
+pub fn evaluate_key_policy(
+    metadata: KeyMetadataView,
+    required_algorithm: Option<KeyAlgorithm>,
+    required_usage_mask: u8,
+    export_requested: bool,
+    allowed_lifecycle_states: &[KeyLifecycleState],
+) -> PolicyDecision {
+    if !allowed_lifecycle_states.contains(&metadata.lifecycle_state) {
+        return PolicyDecision::deny(DenialClass::KeyPolicyDenied);
+    }
+
+    if required_usage_mask != 0 && metadata.usage_mask & required_usage_mask == 0 {
+        return PolicyDecision::deny(DenialClass::KeyPolicyDenied);
+    }
+
+    if export_requested && metadata.export_policy == ExportPolicy::NonExportable {
+        return PolicyDecision::deny(DenialClass::KeyPolicyDenied);
+    }
+
+    if let Some(required_algorithm) = required_algorithm
+        && metadata.algorithm != required_algorithm
+    {
+        return PolicyDecision::deny(DenialClass::KeyPolicyDenied);
+    }
+
+    PolicyDecision::allow()
+}
+
+#[must_use]
+pub const fn status_for_denial_class(denial_class: DenialClass) -> StatusCode {
+    match denial_class {
+        DenialClass::None => StatusCode::Success,
+        DenialClass::CommandUnavailable => StatusCode::CommandError,
+        DenialClass::StateDenied => StatusCode::StateError,
+        DenialClass::RoleDenied
+        | DenialClass::KeyPolicyDenied
+        | DenialClass::ApprovalMissing
+        | DenialClass::ApprovalStale => StatusCode::AuthorizationError,
+        DenialClass::InternalPolicyError => StatusCode::InternalError,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn new_approval_ticket(
+    ticket_id: u32,
+    approval_class: ProtectedActionClass,
+    target_binding: ApprovalTargetBinding,
+    target_id: u32,
+    initiator_role: AuthorityRole,
+    confirmer_role: AuthorityRole,
+    initiator_session_id: u32,
+    policy_revision: u32,
+    device_revision: u32,
+    current_tick: u32,
+) -> ApprovalTicket {
+    ApprovalTicket {
+        ticket_id,
+        approval_class,
+        target_binding,
+        target_id,
+        initiator_role,
+        confirmer_role,
+        initiator_session_id,
+        policy_revision,
+        device_revision,
+        expires_at_tick: current_tick.saturating_add(u32::from(APPROVAL_TICKET_EXPIRY_TICKS)),
+        state: ApprovalTicketState::Pending,
+    }
+}
+
+pub fn clear_approval_tickets(
+    tickets: &mut Vec<ApprovalTicket, MAX_APPROVAL_TICKETS>,
+) {
+    tickets.clear();
+}
+
+pub fn invalidate_approval_tickets(
+    tickets: &mut Vec<ApprovalTicket, MAX_APPROVAL_TICKETS>,
+) {
+    for ticket in tickets.iter_mut() {
+        ticket.state = ApprovalTicketState::Invalidated;
+    }
+}
+
+pub fn retain_active_approval_tickets(
+    tickets: &mut Vec<ApprovalTicket, MAX_APPROVAL_TICKETS>,
+) {
+    let mut retained = Vec::<ApprovalTicket, MAX_APPROVAL_TICKETS>::new();
+    for ticket in tickets.iter().copied() {
+        if matches!(
+            ticket.state,
+            ApprovalTicketState::Pending | ApprovalTicketState::Confirmed
+        ) {
+            let _ = retained.push(ticket);
         }
     }
-
-    if !definition.enabled {
-        return Err(StatusCode::StateError);
-    }
-
-    Ok(())
+    *tickets = retained;
 }
 
 /// # Errors

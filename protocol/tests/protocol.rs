@@ -60,3 +60,13 @@ mod random_generation;
 mod wrapped_import;
 #[path = "protocol/high_risk_denials.rs"]
 mod high_risk_denials;
+#[path = "protocol/policy_command_matrix.rs"]
+mod policy_command_matrix;
+#[path = "protocol/approval_ticket_lifecycle.rs"]
+mod approval_ticket_lifecycle;
+#[path = "protocol/protected_action_denials.rs"]
+mod protected_action_denials;
+#[path = "protocol/approval_staleness.rs"]
+mod approval_staleness;
+#[path = "protocol/policy_reviewability.rs"]
+mod policy_reviewability;

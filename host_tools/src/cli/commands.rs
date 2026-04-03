@@ -60,6 +60,26 @@ pub fn execute(parsed: ParsedArgs) -> Result<CommandOutput, CliError> {
                 format!("action={}", developer_fault_name(action)),
             ]))
         }
+        CommandSpec::DeveloperSetPolicy { update } => {
+            let devices = discover_devices(parsed.global.baud)?;
+            let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
+            let result = SerialBackend::new(crate::client::ClientConfig::new(selected.clone(), parsed.global.baud))
+                .developer_set_policy(update)?;
+            Ok(lines_output(&[
+                format!("device={selected}"),
+                format!("policy_profile_version={}", result[0]),
+                format!(
+                    "policy_revision={}",
+                    u32::from_le_bytes([result[1], result[2], result[3], result[4]])
+                ),
+                format!("dual_control_enabled={}", yes_no(result[5] != 0)),
+                format!(
+                    "protected_action_mask=0x{:04x}",
+                    u16::from_le_bytes([result[6], result[7]])
+                ),
+                format!("developer_commands_visible={}", yes_no(result[8] != 0)),
+            ]))
+        }
         CommandSpec::ProvisionBootstrap { proof_env, label } => {
             let proof = load_named_proof(&proof_env)?;
             let devices = discover_devices(parsed.global.baud)?;
@@ -338,6 +358,19 @@ fn format_status(report: &StatusReport) -> Vec<String> {
         lines.push(format!("crypto_max_random_len={}", capabilities[8]));
         lines.push(format!("wrapped_import_enabled={}", yes_no(capabilities[9] != 0)));
     }
+    if let Some(policy) = report.policy_profile {
+        lines.push(format!("policy_profile_version={}", policy[0]));
+        lines.push(format!(
+            "policy_revision={}",
+            u32::from_le_bytes([policy[1], policy[2], policy[3], policy[4]])
+        ));
+        lines.push(format!("dual_control_enabled={}", yes_no(policy[5] != 0)));
+        lines.push(format!(
+            "protected_action_mask=0x{:04x}",
+            u16::from_le_bytes([policy[6], policy[7]])
+        ));
+        lines.push(format!("developer_commands_visible={}", yes_no(policy[8] != 0)));
+    }
     lines
 }
 
@@ -517,9 +550,11 @@ mod tests {
             key_store_status: [1, 0, 8, 0, 0],
             session_status: [0, 5, 0, 0, 0, 1],
             crypto_capabilities: Some([1, 0x0f, 1, 3, 0x80, 0x00, 0x40, 0x00, 0x40, 1]),
+            policy_profile: Some([1, 0x02, 0x00, 0x00, 0x00, 1, 0x07, 0x00, 1]),
         });
         assert!(lines.iter().any(|line| line == "device=/dev/ttyACM0"));
         assert!(lines.iter().any(|line| line == "wrapped_import_enabled=yes"));
+        assert!(lines.iter().any(|line| line == "dual_control_enabled=yes"));
     }
 
     #[test]

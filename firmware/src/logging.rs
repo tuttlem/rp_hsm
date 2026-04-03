@@ -40,6 +40,7 @@ static LOG_BUFFER: Mutex<RefCell<Deque<u8, LOG_BUFFER_SIZE>>> =
     Mutex::new(RefCell::new(Deque::new()));
 
 #[cfg(feature = "developer-mode")]
+#[allow(dead_code)]
 pub struct Logger;
 
 #[cfg(feature = "developer-mode")]
@@ -56,6 +57,7 @@ impl Write for Logger {
 }
 
 #[cfg(feature = "developer-mode")]
+#[allow(dead_code)]
 pub fn print_args(args: fmt::Arguments<'_>) {
     let mut logger = Logger;
     let _ = logger.write_fmt(args);

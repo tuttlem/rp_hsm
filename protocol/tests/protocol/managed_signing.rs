@@ -36,5 +36,6 @@ fn revoked_key_cannot_be_used_for_signing() {
     assert_eq!(revoke.code, StatusCode::Success.as_u8());
 
     let denied = engine.handle_bytes(&sign_request(session, 4, 0x01, b"sign me"));
-    assert_eq!(denied.code, StatusCode::StateError.as_u8());
+    assert_eq!(denied.code, StatusCode::AuthorizationError.as_u8());
+    assert_eq!(denied.payload.as_slice(), &[0x04]);
 }

@@ -134,6 +134,11 @@ fn main() -> ! {
             protocol_engine.restore_key_store(state.key_store);
             protocol_engine.restore_auth_snapshot(state.auth);
             protocol_engine.restore_crypto_persistent_state(state.crypto);
+            protocol_engine.restore_policy_profile(state.policy);
+            protocol_engine.restore_approval_tickets(
+                state.approval_tickets,
+                state.next_approval_ticket_id,
+            );
         }
         Ok(persistence::LoadOutcome::Corrupted) => {
             let fallback = persistence::corrupted_recovery_state();
@@ -141,6 +146,11 @@ fn main() -> ! {
             protocol_engine.restore_key_store(fallback.key_store);
             protocol_engine.restore_auth_snapshot(fallback.auth);
             protocol_engine.restore_crypto_persistent_state(fallback.crypto);
+            protocol_engine.restore_policy_profile(fallback.policy);
+            protocol_engine.restore_approval_tickets(
+                fallback.approval_tickets,
+                fallback.next_approval_ticket_id,
+            );
         }
         Ok(persistence::LoadOutcome::Empty) | Err(_) => {}
     }
@@ -152,6 +162,9 @@ fn main() -> ! {
         key_store: protocol_engine.key_store().snapshot(),
         auth: protocol_engine.auth_snapshot().clone(),
         crypto: protocol_engine.crypto_persistent_state(),
+        policy: protocol_engine.policy_profile(),
+        approval_tickets: protocol_engine.approval_tickets().clone(),
+        next_approval_ticket_id: protocol_engine.next_approval_ticket_id(),
     });
     let mut led_is_on = false;
     let mut next_toggle_at = timer.get_counter().ticks();
@@ -211,6 +224,9 @@ fn main() -> ! {
                 let prior_key_store = protocol_engine.key_store().snapshot();
                 let prior_auth = protocol_engine.auth_snapshot().clone();
                 let prior_crypto = protocol_engine.crypto_persistent_state();
+                let prior_policy = protocol_engine.policy_profile();
+                let prior_approval_tickets = protocol_engine.approval_tickets().clone();
+                let prior_next_approval_ticket_id = protocol_engine.next_approval_ticket_id();
                 let mut response = protocol_engine.handle_bytes(&frame_buf[..expected_len]);
                 let mut reboot_requested = false;
                 if response.code == StatusCode::Success.as_u8() {
@@ -218,22 +234,36 @@ fn main() -> ! {
                     let current_key_store = protocol_engine.key_store().snapshot();
                     let current_auth = protocol_engine.auth_snapshot().clone();
                     let current_crypto = protocol_engine.crypto_persistent_state();
+                    let current_policy = protocol_engine.policy_profile();
+                    let current_approval_tickets = protocol_engine.approval_tickets().clone();
+                    let current_next_approval_ticket_id = protocol_engine.next_approval_ticket_id();
                     if current_provisioning != prior_provisioning
                         || current_key_store != prior_key_store
                         || current_auth != prior_auth
                         || current_crypto != prior_crypto
+                        || current_policy != prior_policy
+                        || current_approval_tickets != prior_approval_tickets
+                        || current_next_approval_ticket_id != prior_next_approval_ticket_id
                     {
                         let persist_result = persistence::FlashStateStore::save(&persistence::PersistedState {
                             provisioning: current_provisioning.clone(),
                             key_store: current_key_store.clone(),
                             auth: current_auth.clone(),
                             crypto: current_crypto,
+                            policy: current_policy,
+                            approval_tickets: current_approval_tickets.clone(),
+                            next_approval_ticket_id: current_next_approval_ticket_id,
                         });
                         if persist_result.is_err() {
                             protocol_engine.restore_provisioning_snapshot(prior_provisioning);
                             protocol_engine.restore_key_store(prior_key_store);
                             protocol_engine.restore_auth_snapshot(prior_auth);
                             protocol_engine.restore_crypto_persistent_state(prior_crypto);
+                            protocol_engine.restore_policy_profile(prior_policy);
+                            protocol_engine.restore_approval_tickets(
+                                prior_approval_tickets,
+                                prior_next_approval_ticket_id,
+                            );
                             let _ = protocol_engine.take_firmware_action();
                             response = status_response(StatusCode::InternalError, &[]);
                         }

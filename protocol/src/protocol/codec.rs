@@ -5,13 +5,14 @@ use super::frame::{
     RESERVED_FLAG_MASK,
 };
 use super::state::{
-    AuthorityRole, CryptoCapabilities, DeveloperResetOutcome, DeviceState, ExportPolicy,
-    ImportWrappedKeyRequest, KeyAlgorithm, KeyDestroyResult, KeyListEntry, KeyMaterialEnvelope,
-    KeyMetadataView, KeyOrigin, KeyRecordResult, KeyStoreStatus, LifecycleStatus, LockResult,
-    MAX_CRYPTO_MESSAGE_LEN, MAX_RANDOM_OUTPUT_LEN, MAX_SIGNATURE_LEN, MAX_WRAPPED_CIPHERTEXT_LEN,
-    MAX_WRAPPED_TAG_LEN, P256_PUBLIC_KEY_LEN, PutPersistentKeyRequest, RandomRequest,
-    RecoveryResult, SessionState, SessionStatus, SignRequest, StateRevision, TransitionResult,
-    VerifyRequest, ZeroizeOutcome,
+    ApprovalTicket, AuthorityRole, CryptoCapabilities, DenialClass,
+    DeveloperResetOutcome, DeviceState, ExportPolicy, ImportWrappedKeyRequest, KeyAlgorithm,
+    KeyDestroyResult, KeyListEntry, KeyMaterialEnvelope, KeyMetadataView, KeyOrigin,
+    KeyRecordResult, KeyStoreStatus, LifecycleStatus, LockResult, MAX_CRYPTO_MESSAGE_LEN,
+    MAX_RANDOM_OUTPUT_LEN, MAX_SIGNATURE_LEN, MAX_WRAPPED_CIPHERTEXT_LEN, MAX_WRAPPED_TAG_LEN,
+    P256_PUBLIC_KEY_LEN, PolicyProfile, PutPersistentKeyRequest, RandomRequest, RecoveryResult,
+    SessionState, SessionStatus, SignRequest, StateRevision, TransitionResult, VerifyRequest,
+    ZeroizeOutcome,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +107,74 @@ pub fn status_response(status: StatusCode, payload: &[u8]) -> ProtocolFrame {
             payload: Vec::new(),
         }
     })
+}
+
+#[must_use]
+pub fn encode_policy_denial_payload(
+    denial_class: DenialClass,
+    approval_ticket_id: Option<u32>,
+) -> Option<Vec<u8, MAX_PAYLOAD_LEN>> {
+    let mut payload = Vec::new();
+    payload.push(denial_class as u8).ok()?;
+    if let Some(ticket_id) = approval_ticket_id {
+        payload.extend_from_slice(&ticket_id.to_le_bytes()).ok()?;
+    }
+    Some(payload)
+}
+
+#[must_use]
+pub fn policy_status_response(
+    status: StatusCode,
+    denial_class: DenialClass,
+    approval_ticket_id: Option<u32>,
+) -> ProtocolFrame {
+    let payload = encode_policy_denial_payload(denial_class, approval_ticket_id)
+        .unwrap_or_default();
+    status_response(status, &payload)
+}
+
+#[must_use]
+pub fn encode_approval_ticket_payload(ticket: ApprovalTicket) -> [u8; 12] {
+    let ticket_id = ticket.ticket_id.to_le_bytes();
+    let target_id = ticket.target_id.to_le_bytes();
+    [
+        ticket.ticket_id.to_le_bytes()[0],
+        ticket_id[1],
+        ticket_id[2],
+        ticket_id[3],
+        ticket.approval_class as u8,
+        ticket.state as u8,
+        target_id[0],
+        target_id[1],
+        target_id[2],
+        target_id[3],
+        ticket.initiator_role as u8,
+        ticket.confirmer_role as u8,
+    ]
+}
+
+#[must_use]
+pub fn encode_approval_status_payload(
+    ticket: ApprovalTicket,
+    expires_in_ticks: u16,
+) -> [u8; 14] {
+    let base = encode_approval_ticket_payload(ticket);
+    [
+        base[0],
+        base[1],
+        base[2],
+        base[3],
+        base[4],
+        base[5],
+        base[6],
+        base[7],
+        base[8],
+        base[9],
+        base[10],
+        base[11],
+        expires_in_ticks.to_le_bytes()[0],
+        expires_in_ticks.to_le_bytes()[1],
+    ]
 }
 
 pub fn clear_bytes(bytes: &mut [u8]) {
@@ -257,6 +326,23 @@ pub fn encode_developer_reset_payload(result: DeveloperResetOutcome) -> [u8; 4] 
         u8::from(result.owner_binding_cleared),
         u8::from(result.pending_transition_cleared),
         u8::from(result.transient_buffers_cleared),
+    ]
+}
+
+#[must_use]
+pub fn encode_policy_profile_payload(profile: PolicyProfile) -> [u8; 9] {
+    let revision = profile.policy_revision.to_le_bytes();
+    let mask = profile.protected_action_mask.to_le_bytes();
+    [
+        profile.profile_version,
+        revision[0],
+        revision[1],
+        revision[2],
+        revision[3],
+        u8::from(profile.dual_control_enabled),
+        mask[0],
+        mask[1],
+        u8::from(profile.developer_commands_visible),
     ]
 }
 

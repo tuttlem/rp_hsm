@@ -1,5 +1,5 @@
 use super::output::CliError;
-use crate::client::{DeveloperFaultAction, Role, VerifyAlgorithm};
+use crate::client::{DeveloperFaultAction, PolicyProfileUpdate, Role, VerifyAlgorithm};
 
 pub const DEFAULT_BAUD: u32 = 115_200;
 
@@ -22,6 +22,7 @@ pub enum CommandSpec {
     DeveloperReset,
     DeveloperReboot,
     DeveloperStoreFault { action: DeveloperFaultAction },
+    DeveloperSetPolicy { update: PolicyProfileUpdate },
     ProvisionBootstrap { proof_env: String, label: String },
     AuthCheck { auth: AuthOptions },
     Lock { auth: AuthOptions },
@@ -85,6 +86,7 @@ where
     let mut signature_hex = None;
     let mut transition_id = None;
     let mut action = None;
+    let mut dual_control = None;
 
     let mut idx = 0usize;
     while idx < rest.len() {
@@ -179,6 +181,13 @@ where
                 };
                 action = Some(DeveloperFaultAction::parse(value)?);
             }
+            "--dual-control" => {
+                idx += 1;
+                let Some(value) = rest.get(idx) else {
+                    return Err(CliError::usage("missing value for --dual-control"));
+                };
+                dual_control = Some(parse_toggle(value)?);
+            }
             "--help" | "-h" => {
                 return Err(CliError::usage(command_usage(&command_name, show_all_help)));
             }
@@ -200,6 +209,7 @@ where
         signature_hex,
         transition_id,
         action,
+        dual_control,
     )?;
 
     Ok(ParsedArgs { global, command })
@@ -250,7 +260,7 @@ fn qualify_subcommand(prefix: &str, rest: &mut Vec<String>) -> Result<String, Cl
     Ok(format!("{prefix}-{subcommand}"))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn build_command(
     command_name: String,
     role: Option<Role>,
@@ -263,11 +273,19 @@ fn build_command(
     signature_hex: Option<String>,
     transition_id: Option<u32>,
     action: Option<DeveloperFaultAction>,
+    dual_control: Option<bool>,
 ) -> Result<CommandSpec, CliError> {
     match command_name.as_str() {
         "find" => Ok(CommandSpec::Find),
         "status" => Ok(CommandSpec::Status),
-        "reset" | "developer-reset" => Ok(CommandSpec::DeveloperReset),
+        "reset" | "developer-reset" | "dev-reset" => Ok(CommandSpec::DeveloperReset),
+        "developer-set-policy" | "dev-set-policy" => Ok(CommandSpec::DeveloperSetPolicy {
+            update: PolicyProfileUpdate {
+                dual_control_enabled: dual_control.ok_or_else(|| {
+                    CliError::usage("missing --dual-control for developer-set-policy")
+                })?,
+            },
+        }),
         "provision" => Ok(CommandSpec::ProvisionBootstrap {
             proof_env: proof_env
                 .ok_or_else(|| CliError::usage("missing --proof-env for provision"))?,
@@ -394,6 +412,14 @@ fn parse_u32(value: &str) -> Result<u32, CliError> {
     }
 }
 
+fn parse_toggle(value: &str) -> Result<bool, CliError> {
+    match value {
+        "on" | "enable" | "enabled" | "true" | "yes" | "1" => Ok(true),
+        "off" | "disable" | "disabled" | "false" | "no" | "0" => Ok(false),
+        _ => Err(CliError::usage("invalid value for --dual-control")),
+    }
+}
+
 fn command_usage(command: &str, show_all_help: bool) -> String {
     match command {
         "find" => "Usage: rphsmtool find [--baud 115200]".into(),
@@ -406,6 +432,8 @@ fn command_usage(command: &str, show_all_help: bool) -> String {
         "dev-reboot" => "Usage: rphsmtool dev reboot [--device PATH] [--baud 115200]".into(),
         "developer-store-fault" => "Usage: rphsmtool developer-store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store [--baud 115200]".into(),
         "dev-store-fault" => "Usage: rphsmtool dev store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store [--baud 115200]".into(),
+        "developer-set-policy" => "Usage: rphsmtool developer-set-policy [--device PATH] --dual-control on|off [--baud 115200]".into(),
+        "dev-set-policy" => "Usage: rphsmtool dev set-policy [--device PATH] --dual-control on|off [--baud 115200]".into(),
         "provision-bootstrap" => "Usage: rphsmtool provision-bootstrap [--device PATH] --proof-env VAR [--label NAME] [--baud 115200]".into(),
         "auth-check" => "Usage: rphsmtool auth-check [--device PATH] --role bootstrap|administrator|recovery|key-manager --proof-env VAR [--baud 115200]".into(),
         "lock" => "Usage: rphsmtool lock [--device PATH] --role administrator --proof-env VAR [--baud 115200]".into(),
@@ -469,6 +497,11 @@ pub fn usage_text() -> String {
         "  rphsmtool dev reset [--device PATH] [--baud 115200]",
         "  rphsmtool dev reboot [--device PATH] [--baud 115200]",
         "  rphsmtool dev store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store [--baud 115200]",
+        "  rphsmtool dev set-policy [--device PATH] --dual-control on|off [--baud 115200]",
+        "",
+        "Policy Notes:",
+        "  bounded denials are reported as command-unavailable, state-denied, role/session-denied,",
+        "  key-policy-denied, approval-required, approval-stale, or internal-policy-ambiguity",
         "",
         "More:",
         "  rphsmtool help --all",
@@ -489,6 +522,8 @@ pub fn all_usage_text() -> String {
         "  rphsmtool dev reboot [--device PATH] [--baud 115200]",
         "  rphsmtool developer-store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store [--baud 115200]",
         "  rphsmtool dev store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store [--baud 115200]",
+        "  rphsmtool developer-set-policy [--device PATH] --dual-control on|off [--baud 115200]",
+        "  rphsmtool dev set-policy [--device PATH] --dual-control on|off [--baud 115200]",
         "  rphsmtool provision [--device PATH] --proof-env VAR [--label NAME] [--baud 115200]",
         "  rphsmtool provision-bootstrap [--device PATH] --proof-env VAR [--label NAME] [--baud 115200]",
         "  rphsmtool auth-check [--device PATH] --role bootstrap|administrator|recovery|key-manager --proof-env VAR [--baud 115200]",
@@ -525,7 +560,7 @@ pub fn all_usage_text() -> String {
 #[cfg(test)]
 mod tests {
     use super::{CommandSpec, ParsedArgs, parse_args};
-    use crate::client::Role;
+    use crate::client::{PolicyProfileUpdate, Role};
 
     fn parse(parts: &[&str]) -> Result<ParsedArgs, super::CliError> {
         parse_args(parts.iter().map(|s| s.to_string()))
@@ -586,6 +621,26 @@ mod tests {
     fn parses_developer_reset() {
         let parsed = parse(&["rphsmtool", "developer-reset"]).expect("parse");
         assert!(matches!(parsed.command, CommandSpec::DeveloperReset));
+    }
+
+    #[test]
+    fn parses_grouped_developer_set_policy_alias() {
+        let parsed = parse(&[
+            "rphsmtool",
+            "dev",
+            "set-policy",
+            "--dual-control",
+            "on",
+        ])
+        .expect("parse");
+        assert!(matches!(
+            parsed.command,
+            CommandSpec::DeveloperSetPolicy {
+                update: PolicyProfileUpdate {
+                    dual_control_enabled: true
+                }
+            }
+        ));
     }
 
     #[test]

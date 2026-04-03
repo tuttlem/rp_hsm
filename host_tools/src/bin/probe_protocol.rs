@@ -9,7 +9,7 @@ use chacha20poly1305::{
 use protocol::protocol::{
     FLAG_INCLUDE_RESTRICTED, KeyAlgorithm, MessageKind, PROTOCOL_VERSION, ProtocolFrame,
     StatusCode, USAGE_WRAP_IMPORT, developer_reset_marker, ed25519_public_key_from_seed,
-    encode_frame, finalize_marker, unlock_marker,
+    encode_frame, finalize_marker, unlock_marker, zeroize_marker,
 };
 
 const DEFAULT_BAUD: u32 = 115_200;
@@ -76,6 +76,19 @@ fn main() -> Result<(), DynError> {
     replay_list_denied(&mut *port, key_manager, 2)?;
     invalidate_session(&mut *port, key_manager, 3)?;
     expect_session_inactive(&mut *port)?;
+
+    set_dual_control(&mut *port, true)?;
+    let key_manager = authenticate(&mut *port, "KeyManagerDestroyOne", 0x06, b"KEYMG")?;
+    destroy_key_requires_approval(&mut *port, key_manager, 2, 0x01, 0x05)?;
+    set_dual_control(&mut *port, false)?;
+    set_dual_control(&mut *port, true)?;
+    let key_manager = authenticate(&mut *port, "KeyManagerDestroyStale", 0x06, b"KEYMG")?;
+    destroy_key_requires_approval(&mut *port, key_manager, 2, 0x01, 0x06)?;
+    let key_manager = authenticate(&mut *port, "KeyManagerDestroyThree", 0x06, b"KEYMG")?;
+    destroy_key_requires_approval(&mut *port, key_manager, 2, 0x01, 0x05)?;
+    let key_manager = authenticate(&mut *port, "KeyManagerDestroyFour", 0x06, b"KEYMG")?;
+    destroy_key_succeeds(&mut *port, key_manager, 2, 0x01)?;
+    set_dual_control(&mut *port, false)?;
 
     let key_manager = authenticate(&mut *port, "KeyManagerExpiry", 0x06, b"KEYMG")?;
     for _ in 0..10 {
@@ -221,7 +234,7 @@ fn probe_public_catalog(port: &mut dyn serialport::SerialPort) -> Result<(), Dyn
     expect_payload(
         &restricted,
         StatusCode::Success,
-        &[0x0d, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0a, 0x0b, 0x88, 0x8e, 0x8f],
+        &[0x0e, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0a, 0x0b, 0x88, 0x8e, 0x8f, 0x97],
     )
 }
 
@@ -540,6 +553,75 @@ fn expect_session_inactive(port: &mut dyn serialport::SerialPort) -> Result<(), 
 fn developer_reboot(port: &mut dyn serialport::SerialPort) -> Result<(), DynError> {
     let response = exchange(port, "DeveloperReboot", &request(0x8f, 0x02, b"RST"))?;
     expect_status(&response, StatusCode::Success)
+}
+
+fn set_dual_control(
+    port: &mut dyn serialport::SerialPort,
+    enabled: bool,
+) -> Result<(), DynError> {
+    let response = exchange(
+        port,
+        if enabled {
+            "DeveloperSetPolicyDualControlOn"
+        } else {
+            "DeveloperSetPolicyDualControlOff"
+        },
+        &request(0x97, 0x02, &[u8::from(enabled)]),
+    )?;
+    expect_status(&response, StatusCode::Success)?;
+    if response.payload.len() != 9 {
+        return Err("unexpected policy payload shape".into());
+    }
+    if response.payload[5] != u8::from(enabled) {
+        return Err("unexpected dual-control flag state".into());
+    }
+    settle_after_flash_mutation();
+    Ok(())
+}
+
+fn destroy_key_requires_approval(
+    port: &mut dyn serialport::SerialPort,
+    session_id: [u8; 4],
+    counter: u32,
+    key_id: u8,
+    denial_class: u8,
+) -> Result<(), DynError> {
+    let mut inner = vec![key_id];
+    inner.extend_from_slice(&zeroize_marker());
+    let response = exchange(
+        port,
+        "DestroyKeyRequiresApproval",
+        &request(0x8d, 0x02, &authorized_payload(session_id, counter, &inner)),
+    )?;
+    expect_status(&response, StatusCode::AuthorizationError)?;
+    if response.payload.len() != 5 || response.payload[0] != denial_class {
+        return Err(
+            format!(
+                "unexpected approval denial payload: {}",
+                hex(response.payload.as_slice())
+            )
+            .into(),
+        );
+    }
+    Ok(())
+}
+
+fn destroy_key_succeeds(
+    port: &mut dyn serialport::SerialPort,
+    session_id: [u8; 4],
+    counter: u32,
+    key_id: u8,
+) -> Result<(), DynError> {
+    let mut inner = vec![key_id];
+    inner.extend_from_slice(&zeroize_marker());
+    let response = exchange(
+        port,
+        "DestroyKeyApproved",
+        &request(0x8d, 0x02, &authorized_payload(session_id, counter, &inner)),
+    )?;
+    expect_status(&response, StatusCode::Success)?;
+    settle_after_flash_mutation();
+    Ok(())
 }
 
 fn probe_lifecycle_status(

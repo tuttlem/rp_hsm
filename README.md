@@ -104,7 +104,7 @@ cargo probe -- --help
 The probe expects a `developer-mode` firmware image and validates:
 
 1. protocol version and public command catalog shape
-2. developer-mode restricted catalog visibility for `DeveloperResetLifecycle`, `DeveloperStoreFault`, and `DeveloperReboot`
+2. developer-mode restricted catalog visibility for `DeveloperResetLifecycle`, `DeveloperStoreFault`, `DeveloperReboot`, and `DeveloperSetPolicy`
 3. unauthenticated denial of privileged commands
 4. bootstrap authentication and provisioning from `factory` to `operational`
 5. public crypto capability discovery
@@ -114,6 +114,20 @@ The probe expects a `developer-mode` firmware image and validates:
 9. repeated failed authentication attempts triggering lockout
 10. reboot-driven invalidation of active authenticated sessions
 11. developer-only lifecycle reset back to `factory`
+
+Policy-enforcement note:
+
+- `006-policy-enforcement` adds bounded denial classes to command responses.
+  Current host tooling renders these as role/session denial, key-policy denial,
+  state denial, approval-required, approval-stale, or internal-policy
+  ambiguity.
+- The persisted policy profile defaults to the single-reviewed-path behavior so
+  existing operator flows remain usable.
+- Dual-control approval-ticket behavior is implemented and covered by protocol
+  tests, but there is not yet a runtime host command to toggle that policy on a
+  live device. Hardware probe coverage therefore validates the bounded denial
+  surface and reviewed default path, while dual-control approval semantics are
+  regression-tested in the protocol crate.
 
 Important:
 
@@ -175,6 +189,7 @@ cargo rphsmtool status --device /dev/ttyACM0
 cargo rphsmtool developer-reset --device /dev/ttyACM0
 cargo rphsmtool developer-reboot --device /dev/ttyACM0
 cargo rphsmtool developer-store-fault --device /dev/ttyACM0 --action rollback-persisted-store
+cargo rphsmtool developer-set-policy --device /dev/ttyACM0 --dual-control on
 cargo rphsmtool provision-bootstrap --device /dev/ttyACM0 --proof-env RPHSM_PROOF
 cargo rphsmtool auth-check --device /dev/ttyACM0 --role administrator --proof-env RPHSM_PROOF
 cargo rphsmtool lock --device /dev/ttyACM0 --role administrator --proof-env RPHSM_PROOF
@@ -202,6 +217,9 @@ Behavior:
 - `developer-reboot` and `developer-store-fault` are exposed for lab validation
   and only succeed when the connected firmware includes the developer-only
   command set.
+- `developer-set-policy` toggles developer-only policy switches such as
+  `dual_control_enabled` and persists the updated policy profile for later
+  validation.
 - `provision-bootstrap` performs the reviewed bootstrap auth plus begin/finalize
   provisioning flow needed to move a factory-state device into a usable state.
 - `auth-check` verifies that a reviewed role can authenticate successfully

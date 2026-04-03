@@ -3,10 +3,12 @@ use core::slice;
 use critical_section::with;
 use heapless::Vec;
 use protocol::protocol::{
-    AuthSnapshot, AuthorityRole, CredentialKind, CredentialRecord, CryptoPersistentState,
-    DeveloperStoreFaultAction, DeviceState, ExportPolicy, KeyAlgorithm, KeyLifecycleState,
-    KeyMetadata, KeyOrigin, KeyStoreRecord, KeyStoreSnapshot, MAX_KEY_JOURNAL_RECORDS,
-    MAX_KEY_MATERIAL_LEN, ProvisioningSnapshot, RecoveryPolicy, TransitionIntent, TransitionType,
+    ApprovalTargetBinding, ApprovalTicket, ApprovalTicketState, AuthSnapshot, AuthorityRole,
+    CredentialKind, CredentialRecord, CryptoPersistentState, DeveloperStoreFaultAction,
+    DeviceState, ExportPolicy, KeyAlgorithm, KeyLifecycleState, KeyMetadata, KeyOrigin,
+    KeyStoreRecord, KeyStoreSnapshot, MAX_APPROVAL_TICKETS, MAX_KEY_JOURNAL_RECORDS,
+    MAX_KEY_MATERIAL_LEN, POLICY_PROFILE_VERSION, PolicyProfile, ProtectedActionClass,
+    ProvisioningSnapshot, RecoveryPolicy, TransitionIntent, TransitionType,
 };
 use protocol::protocol::state::{
     AuthorizationMode, FreshnessAnchor, KeyMaterialEnvelope, LifecycleState, MaterialEncoding,
@@ -32,6 +34,9 @@ pub struct PersistedState {
     pub key_store: KeyStoreSnapshot,
     pub auth: AuthSnapshot,
     pub crypto: CryptoPersistentState,
+    pub policy: PolicyProfile,
+    pub approval_tickets: Vec<ApprovalTicket, MAX_APPROVAL_TICKETS>,
+    pub next_approval_ticket_id: u32,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -195,6 +200,9 @@ pub fn corrupted_recovery_state() -> PersistedState {
         },
         auth: AuthSnapshot::default(),
         crypto: CryptoPersistentState::default(),
+        policy: PolicyProfile::default(),
+        approval_tickets: Vec::new(),
+        next_approval_ticket_id: 1,
     }
 }
 
@@ -320,7 +328,8 @@ fn encode_state(
     encode_provisioning(&state.provisioning, out)?;
     encode_key_store(&state.key_store, out)?;
     encode_auth_snapshot(&state.auth, out)?;
-    encode_crypto_state(&state.crypto, out)
+    encode_crypto_state(&state.crypto, out)?;
+    encode_policy_state(&state.policy, &state.approval_tickets, state.next_approval_ticket_id, out)
 }
 
 fn encode_provisioning(
@@ -427,6 +436,38 @@ fn encode_crypto_state(
     push_u32(out, snapshot.last_wrapped_import_revision)
 }
 
+fn encode_policy_state(
+    profile: &PolicyProfile,
+    tickets: &Vec<ApprovalTicket, MAX_APPROVAL_TICKETS>,
+    next_ticket_id: u32,
+    out: &mut Vec<u8, PAYLOAD_CAPACITY>,
+) -> Result<(), PersistenceError> {
+    push_u8(out, profile.profile_version)?;
+    push_u32(out, profile.policy_revision)?;
+    push_u8(out, u8::from(profile.dual_control_enabled))?;
+    out.extend_from_slice(&profile.protected_action_mask.to_le_bytes())
+        .map_err(|()| PersistenceError::EncodeOverflow)?;
+    push_u8(out, u8::from(profile.developer_commands_visible))?;
+    push_u8(
+        out,
+        u8::try_from(tickets.len()).map_err(|_| PersistenceError::EncodeOverflow)?,
+    )?;
+    for ticket in tickets {
+        push_u32(out, ticket.ticket_id)?;
+        push_u8(out, ticket.approval_class as u8)?;
+        push_u8(out, ticket.target_binding as u8)?;
+        push_u32(out, ticket.target_id)?;
+        push_u8(out, ticket.initiator_role as u8)?;
+        push_u8(out, ticket.confirmer_role as u8)?;
+        push_u32(out, ticket.initiator_session_id)?;
+        push_u32(out, ticket.policy_revision)?;
+        push_u32(out, ticket.device_revision)?;
+        push_u32(out, ticket.expires_at_tick)?;
+        push_u8(out, ticket.state as u8)?;
+    }
+    push_u32(out, next_ticket_id)
+}
+
 fn push_transition(
     transition: &TransitionIntent,
     out: &mut Vec<u8, PAYLOAD_CAPACITY>,
@@ -467,6 +508,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, PersistenceError> {
     let key_store = decode_key_store(&mut cursor)?;
     let auth = decode_auth_snapshot(&mut cursor)?;
     let crypto = decode_crypto_state(&mut cursor)?;
+    let (policy, approval_tickets, next_approval_ticket_id) = decode_policy_state(&mut cursor)?;
     if !cursor.is_at_end() {
         return Err(PersistenceError::DecodeFailure);
     }
@@ -475,6 +517,9 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, PersistenceError> {
         key_store,
         auth,
         crypto,
+        policy,
+        approval_tickets,
+        next_approval_ticket_id,
     })
 }
 
@@ -640,6 +685,42 @@ fn decode_crypto_state(cursor: &mut Cursor<'_>) -> Result<CryptoPersistentState,
     })
 }
 
+fn decode_policy_state(
+    cursor: &mut Cursor<'_>,
+) -> Result<(PolicyProfile, Vec<ApprovalTicket, MAX_APPROVAL_TICKETS>, u32), PersistenceError> {
+    let profile = PolicyProfile {
+        profile_version: cursor.read_u8()?,
+        policy_revision: cursor.read_u32()?,
+        dual_control_enabled: cursor.read_u8()? != 0,
+        protected_action_mask: u16::from_le_bytes([cursor.read_u8()?, cursor.read_u8()?]),
+        developer_commands_visible: cursor.read_u8()? != 0,
+    };
+    if profile.profile_version != POLICY_PROFILE_VERSION {
+        return Err(PersistenceError::DecodeFailure);
+    }
+    let ticket_len = usize::from(cursor.read_u8()?);
+    let mut tickets = Vec::<ApprovalTicket, MAX_APPROVAL_TICKETS>::new();
+    for _ in 0..ticket_len {
+        tickets
+            .push(ApprovalTicket {
+                ticket_id: cursor.read_u32()?,
+                approval_class: decode_protected_action_class(cursor.read_u8()?)?,
+                target_binding: decode_approval_target_binding(cursor.read_u8()?)?,
+                target_id: cursor.read_u32()?,
+                initiator_role: decode_authority_role(cursor.read_u8()?)?,
+                confirmer_role: decode_authority_role(cursor.read_u8()?)?,
+                initiator_session_id: cursor.read_u32()?,
+                policy_revision: cursor.read_u32()?,
+                device_revision: cursor.read_u32()?,
+                expires_at_tick: cursor.read_u32()?,
+                state: decode_approval_ticket_state(cursor.read_u8()?)?,
+            })
+            .map_err(|_| PersistenceError::DecodeFailure)?;
+    }
+    let next_ticket_id = cursor.read_u32()?;
+    Ok((profile, tickets, next_ticket_id))
+}
+
 fn decode_device_state(byte: u8) -> Result<DeviceState, PersistenceError> {
     match byte {
         0x01 => Ok(DeviceState::Factory),
@@ -694,6 +775,35 @@ fn decode_transition_type(byte: u8) -> Result<TransitionType, PersistenceError> 
         0x07 => Ok(TransitionType::ReactivateRecoveredProvisioning),
         0x08 => Ok(TransitionType::Zeroize),
         0x09 => Ok(TransitionType::DeveloperReset),
+        _ => Err(PersistenceError::DecodeFailure),
+    }
+}
+
+fn decode_protected_action_class(byte: u8) -> Result<ProtectedActionClass, PersistenceError> {
+    match byte {
+        0x00 => Ok(ProtectedActionClass::None),
+        0x01 => Ok(ProtectedActionClass::DestructiveAdmin),
+        0x02 => Ok(ProtectedActionClass::DestructiveKey),
+        0x03 => Ok(ProtectedActionClass::RecoveryTransition),
+        _ => Err(PersistenceError::DecodeFailure),
+    }
+}
+
+fn decode_approval_target_binding(byte: u8) -> Result<ApprovalTargetBinding, PersistenceError> {
+    match byte {
+        0x01 => Ok(ApprovalTargetBinding::Device),
+        0x02 => Ok(ApprovalTargetBinding::KeyId),
+        0x03 => Ok(ApprovalTargetBinding::TransitionId),
+        _ => Err(PersistenceError::DecodeFailure),
+    }
+}
+
+fn decode_approval_ticket_state(byte: u8) -> Result<ApprovalTicketState, PersistenceError> {
+    match byte {
+        0x01 => Ok(ApprovalTicketState::Pending),
+        0x02 => Ok(ApprovalTicketState::Confirmed),
+        0x03 => Ok(ApprovalTicketState::Consumed),
+        0x04 => Ok(ApprovalTicketState::Invalidated),
         _ => Err(PersistenceError::DecodeFailure),
     }
 }

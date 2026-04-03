@@ -16,26 +16,30 @@ use super::codec::{
     encode_developer_reset_payload, encode_device_status_payload, encode_key_destroy_payload,
     encode_key_list_payload, encode_key_metadata_payload, encode_key_record_result_payload,
     encode_key_store_status_payload, encode_lifecycle_status_payload, encode_lock_result_payload,
-    encode_random_payload, encode_recovery_result_payload, encode_session_status_payload,
-    encode_signature_payload, encode_state_revision_payload, encode_transition_result_payload,
-    encode_verify_result_payload, encode_zeroize_payload, protocol_version_response,
-    status_response,
+    encode_policy_denial_payload, encode_policy_profile_payload, encode_random_payload,
+    encode_recovery_result_payload, encode_session_status_payload, encode_signature_payload,
+    encode_state_revision_payload, encode_transition_result_payload, encode_verify_result_payload,
+    encode_zeroize_payload, policy_status_response, protocol_version_response, status_response,
 };
 use super::command::{CommandId, get_visible_catalog, lookup_command};
 use super::frame::{
     FLAG_INCLUDE_RESTRICTED, FLAG_REPLAY_SENSITIVE, MessageKind, PROTOCOL_VERSION, ProtocolFrame,
 };
 use super::state::{
-    AuthSnapshot, AuthenticationChallenge, AuthorityRole, CryptoPersistentState,
-    CryptoRuntimeState, DeviceState, KeyAlgorithm, PersistentKeyStore, ProvisioningRecord,
-    ProvisioningSnapshot, SessionLifecycleState, SessionRecord, SessionState, SessionTracker,
-    USAGE_SIGN, USAGE_WRAP_IMPORT, clear_active_session, clear_auth_failures, clear_challenge,
-    clear_failure_counters, clear_secret_array, current_session_state, current_session_status,
-    developer_mode_session, developer_reset_marker, enforce_replay_policy,
-    ensure_command_allowed, expect_marker_bytes, expect_single_marker, finalize_marker,
-    find_credential, fingerprint_frame, issue_challenge_nonce, reactivate_marker,
-    record_auth_failure, recovery_marker, revoke_marker, role_locked_out,
-    role_to_authorization_mode, unlock_marker, zeroize_marker,
+    ApprovalTargetBinding, ApprovalTicket, ApprovalTicketState, AuthSnapshot,
+    AuthenticationChallenge, AuthorityRole, CryptoPersistentState, CryptoRuntimeState,
+    DenialClass, DeviceState, KeyAlgorithm, KeyLifecycleState, PersistentKeyStore,
+    PolicyProfile, ProtectedActionClass, ProvisioningRecord, ProvisioningSnapshot,
+    SessionLifecycleState, SessionRecord, SessionState, SessionTracker, USAGE_SIGN,
+    USAGE_WRAP_IMPORT, clear_active_session, clear_approval_tickets, clear_auth_failures,
+    clear_challenge, clear_failure_counters, clear_secret_array, current_session_state,
+    current_session_status, developer_mode_session, developer_reset_marker,
+    enforce_replay_policy, evaluate_command_policy, evaluate_key_policy,
+    expect_marker_bytes, expect_single_marker, finalize_marker, find_credential,
+    fingerprint_frame, invalidate_approval_tickets, issue_challenge_nonce, new_approval_ticket,
+    reactivate_marker, record_auth_failure, recovery_marker, retain_active_approval_tickets,
+    revoke_marker, role_locked_out, role_to_authorization_mode, status_for_denial_class,
+    unlock_marker, zeroize_marker, MAX_APPROVAL_TICKETS,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +70,9 @@ pub struct ProtocolEngine {
     key_store: PersistentKeyStore,
     auth_snapshot: AuthSnapshot,
     crypto_state: CryptoRuntimeState,
+    policy_profile: PolicyProfile,
+    approval_tickets: Vec<ApprovalTicket, MAX_APPROVAL_TICKETS>,
+    next_approval_ticket_id: u32,
     active_challenge: Option<AuthenticationChallenge>,
     active_session: Option<SessionRecord>,
     session_state: SessionState,
@@ -85,6 +92,9 @@ impl ProtocolEngine {
             record,
             auth_snapshot: AuthSnapshot::default(),
             crypto_state: CryptoRuntimeState::default(),
+            policy_profile: PolicyProfile::default(),
+            approval_tickets: Vec::new(),
+            next_approval_ticket_id: 1,
             active_challenge: None,
             active_session: None,
             session_state,
@@ -108,6 +118,7 @@ impl ProtocolEngine {
     pub fn new_developer_mode() -> Self {
         let mut engine = Self::new(DeviceState::Factory, developer_mode_session());
         engine.developer_mode = true;
+        engine.policy_profile.developer_commands_visible = true;
         engine
     }
 
@@ -116,6 +127,7 @@ impl ProtocolEngine {
         self.key_store = PersistentKeyStore::new(self.record.revision_counter());
         clear_challenge(&mut self.active_challenge);
         clear_active_session(&mut self.active_session);
+        clear_approval_tickets(&mut self.approval_tickets);
         self.refresh_session_state();
         self.pending_firmware_action = None;
     }
@@ -133,6 +145,7 @@ impl ProtocolEngine {
 
     pub fn set_developer_mode(&mut self, developer_mode: bool) {
         self.developer_mode = developer_mode;
+        self.policy_profile.developer_commands_visible = developer_mode;
         self.refresh_session_state();
     }
 
@@ -141,6 +154,8 @@ impl ProtocolEngine {
         self.key_store
             .sync_device_revision(self.record.revision_counter());
         self.key_store.reconcile_after_boot();
+        invalidate_approval_tickets(&mut self.approval_tickets);
+        retain_active_approval_tickets(&mut self.approval_tickets);
         clear_challenge(&mut self.active_challenge);
         clear_active_session(&mut self.active_session);
         self.session_tracker.last_request_fingerprint = None;
@@ -172,6 +187,21 @@ impl ProtocolEngine {
         self.crypto_state.persistent_state()
     }
 
+    #[must_use]
+    pub fn policy_profile(&self) -> PolicyProfile {
+        self.policy_profile
+    }
+
+    #[must_use]
+    pub fn approval_tickets(&self) -> &Vec<ApprovalTicket, MAX_APPROVAL_TICKETS> {
+        &self.approval_tickets
+    }
+
+    #[must_use]
+    pub fn next_approval_ticket_id(&self) -> u32 {
+        self.next_approval_ticket_id
+    }
+
     pub fn restore_provisioning_snapshot(&mut self, snapshot: ProvisioningSnapshot) {
         self.record.restore_snapshot(snapshot);
     }
@@ -193,6 +223,20 @@ impl ProtocolEngine {
 
     pub fn restore_crypto_persistent_state(&mut self, snapshot: CryptoPersistentState) {
         self.crypto_state.restore_persistent_state(snapshot);
+    }
+
+    pub fn restore_policy_profile(&mut self, profile: PolicyProfile) {
+        self.policy_profile = profile;
+        self.policy_profile.developer_commands_visible = self.developer_mode;
+    }
+
+    pub fn restore_approval_tickets(
+        &mut self,
+        tickets: Vec<ApprovalTicket, MAX_APPROVAL_TICKETS>,
+        next_ticket_id: u32,
+    ) {
+        self.approval_tickets = tickets;
+        self.next_approval_ticket_id = next_ticket_id.max(1);
     }
 
     pub fn seed_rng(&mut self, seed: [u8; 32]) {
@@ -265,6 +309,141 @@ impl ProtocolEngine {
         if self.active_session.is_some() {
             self.invalidate_session();
         }
+    }
+
+    fn invalidate_policy_tickets(&mut self) {
+        invalidate_approval_tickets(&mut self.approval_tickets);
+        retain_active_approval_tickets(&mut self.approval_tickets);
+    }
+
+    fn current_session_id(&self) -> u32 {
+        self.active_session.map_or(0, |session| session.session_id)
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn maybe_create_or_confirm_approval(
+        &mut self,
+        approval_class: ProtectedActionClass,
+        target_binding: ApprovalTargetBinding,
+        target_id: u32,
+        required_role: AuthorityRole,
+        device_revision: u32,
+    ) -> Result<(), ProtocolFrame> {
+        if approval_class == ProtectedActionClass::None
+            || !self.policy_profile.dual_control_enabled
+            || !self.policy_profile.protects(approval_class)
+        {
+            return Ok(());
+        }
+
+        let mut matching_index = None;
+        let mut stale_ticket_id = None;
+        let current_tick = self.request_tick;
+        for (index, ticket) in self.approval_tickets.iter_mut().enumerate() {
+            if ticket.approval_class != approval_class
+                || ticket.target_binding != target_binding
+                || ticket.target_id != target_id
+            {
+                continue;
+            }
+            if ticket.state == ApprovalTicketState::Pending
+                && (ticket.policy_revision != self.policy_profile.policy_revision
+                    || ticket.device_revision != device_revision
+                    || current_tick >= ticket.expires_at_tick)
+            {
+                ticket.state = ApprovalTicketState::Invalidated;
+                stale_ticket_id = Some(ticket.ticket_id);
+            }
+            if matches!(
+                ticket.state,
+                ApprovalTicketState::Pending | ApprovalTicketState::Confirmed
+            ) {
+                if matching_index.is_some() {
+                    return Err(policy_status_response(
+                        status_for_denial_class(DenialClass::InternalPolicyError),
+                        DenialClass::InternalPolicyError,
+                        None,
+                    ));
+                }
+                matching_index = Some(index);
+            }
+        }
+
+        if let Some(ticket_id) = stale_ticket_id {
+            retain_active_approval_tickets(&mut self.approval_tickets);
+            return Err(policy_status_response(
+                status_for_denial_class(DenialClass::ApprovalStale),
+                DenialClass::ApprovalStale,
+                Some(ticket_id),
+            ));
+        }
+
+        if let Some(index) = matching_index {
+            let session_id = self.current_session_id();
+            let ticket = &mut self.approval_tickets[index];
+            if ticket.state != ApprovalTicketState::Pending {
+                return Err(policy_status_response(
+                    status_for_denial_class(DenialClass::ApprovalStale),
+                    DenialClass::ApprovalStale,
+                    Some(ticket.ticket_id),
+                ));
+            }
+            if session_id == 0 || session_id == ticket.initiator_session_id {
+                return Err(policy_status_response(
+                    status_for_denial_class(DenialClass::ApprovalMissing),
+                    DenialClass::ApprovalMissing,
+                    Some(ticket.ticket_id),
+                ));
+            }
+            ticket.state = ApprovalTicketState::Confirmed;
+            ticket.confirmer_role = required_role;
+            return Ok(());
+        }
+
+        let ticket_id = self.next_approval_ticket_id;
+        self.next_approval_ticket_id = self.next_approval_ticket_id.saturating_add(1);
+        let ticket = new_approval_ticket(
+            ticket_id,
+            approval_class,
+            target_binding,
+            target_id,
+            required_role,
+            required_role,
+            self.current_session_id(),
+            self.policy_profile.policy_revision,
+            device_revision,
+            self.request_tick,
+        );
+        if self.approval_tickets.push(ticket).is_err() {
+            return Err(policy_status_response(
+                status_for_denial_class(DenialClass::InternalPolicyError),
+                DenialClass::InternalPolicyError,
+                None,
+            ));
+        }
+        Err(policy_status_response(
+            status_for_denial_class(DenialClass::ApprovalMissing),
+            DenialClass::ApprovalMissing,
+            Some(ticket_id),
+        ))
+    }
+
+    fn consume_approval_ticket(
+        &mut self,
+        approval_class: ProtectedActionClass,
+        target_binding: ApprovalTargetBinding,
+        target_id: u32,
+    ) {
+        for ticket in &mut self.approval_tickets {
+            if ticket.approval_class == approval_class
+                && ticket.target_binding == target_binding
+                && ticket.target_id == target_id
+                && ticket.state == ApprovalTicketState::Confirmed
+            {
+                ticket.state = ApprovalTicketState::Consumed;
+            }
+        }
+        retain_active_approval_tickets(&mut self.approval_tickets);
     }
 
     fn authorize_privileged<'a>(
@@ -395,13 +574,17 @@ impl ProtocolEngine {
             return status_response(StatusCode::ValidationError, &[]);
         }
 
-        if let Err(status) = ensure_command_allowed(
+        let policy = evaluate_command_policy(
             command,
             self.record.current_state(),
             self.session_state,
             self.developer_mode,
-        ) {
-            return status_response(status, &[]);
+            self.policy_profile,
+        );
+        if !policy.decision {
+            let payload = encode_policy_denial_payload(policy.denial_class, policy.approval_ticket_id)
+                .unwrap_or_default();
+            return status_response(status_for_denial_class(policy.denial_class), &payload);
         }
 
         let fingerprint = fingerprint_frame(frame.code, &frame.payload);
@@ -446,6 +629,7 @@ impl ProtocolEngine {
             Some(CommandId::DestroyPersistentKey) => self.handle_destroy_persistent_key(frame),
             Some(CommandId::DeveloperStoreFault) => self.handle_developer_store_fault(frame),
             Some(CommandId::DeveloperReboot) => self.handle_developer_reboot(frame),
+            Some(CommandId::DeveloperSetPolicy) => self.handle_developer_set_policy(frame),
             Some(CommandId::SignDetached) => self.handle_sign_detached(frame),
             Some(CommandId::GenerateRandom) => self.handle_generate_random(frame),
             Some(CommandId::ImportWrappedKey) => self.handle_import_wrapped_key(frame),
@@ -648,6 +832,7 @@ impl ProtocolEngine {
         };
         match self.record.begin_provisioning(inner.as_slice(), frame.code) {
             Ok(result) => {
+                self.invalidate_policy_tickets();
                 let payload = encode_transition_result_payload(result);
                 status_response(StatusCode::Success, &payload)
             }
@@ -672,6 +857,7 @@ impl ProtocolEngine {
 
         match self.record.finalize_provisioning(transition_id) {
             Ok(result) => {
+                self.invalidate_policy_tickets();
                 let payload = encode_state_revision_payload(result);
                 status_response(StatusCode::Success, &payload)
             }
@@ -691,6 +877,7 @@ impl ProtocolEngine {
         };
         match self.record.lock_device(inner[0]) {
             Ok(result) => {
+                self.invalidate_policy_tickets();
                 let payload = encode_lock_result_payload(result);
                 self.invalidate_authenticated_session_only();
                 status_response(StatusCode::Success, &payload)
@@ -715,6 +902,7 @@ impl ProtocolEngine {
 
         match self.record.unlock_device() {
             Ok(result) => {
+                self.invalidate_policy_tickets();
                 let payload = encode_state_revision_payload(result);
                 self.invalidate_authenticated_session_only();
                 status_response(StatusCode::Success, &payload)
@@ -739,6 +927,7 @@ impl ProtocolEngine {
 
         match self.record.enter_recovery() {
             Ok(result) => {
+                self.invalidate_policy_tickets();
                 let payload = encode_recovery_result_payload(result);
                 self.invalidate_authenticated_session_only();
                 status_response(StatusCode::Success, &payload)
@@ -761,8 +950,25 @@ impl ProtocolEngine {
             return status_response(status, &[]);
         }
 
+        let approval_target = self.record.revision_counter();
+        if let Err(response) = self.maybe_create_or_confirm_approval(
+            ProtectedActionClass::RecoveryTransition,
+            ApprovalTargetBinding::Device,
+            approval_target,
+            AuthorityRole::Recovery,
+            self.record.revision_counter(),
+        ) {
+            return response;
+        }
+
         match self.record.recover_to_provisioned() {
             Ok(result) => {
+                self.consume_approval_ticket(
+                    ProtectedActionClass::RecoveryTransition,
+                    ApprovalTargetBinding::Device,
+                    approval_target,
+                );
+                self.invalidate_policy_tickets();
                 let payload = encode_transition_result_payload(result);
                 self.invalidate_authenticated_session_only();
                 status_response(StatusCode::Success, &payload)
@@ -787,8 +993,24 @@ impl ProtocolEngine {
                 Err(status) => return status_response(status, &[]),
             };
 
+        if let Err(response) = self.maybe_create_or_confirm_approval(
+            ProtectedActionClass::RecoveryTransition,
+            ApprovalTargetBinding::TransitionId,
+            transition_id,
+            AuthorityRole::Recovery,
+            self.record.revision_counter(),
+        ) {
+            return response;
+        }
+
         match self.record.reactivate_recovered_provisioning(transition_id) {
             Ok(result) => {
+                self.consume_approval_ticket(
+                    ProtectedActionClass::RecoveryTransition,
+                    ApprovalTargetBinding::TransitionId,
+                    transition_id,
+                );
+                self.invalidate_policy_tickets();
                 let payload = encode_state_revision_payload(result);
                 self.invalidate_authenticated_session_only();
                 status_response(StatusCode::Success, &payload)
@@ -811,9 +1033,26 @@ impl ProtocolEngine {
             return status_response(status, &[]);
         }
 
+        let approval_target = self.record.revision_counter();
+        if let Err(response) = self.maybe_create_or_confirm_approval(
+            ProtectedActionClass::DestructiveAdmin,
+            ApprovalTargetBinding::Device,
+            approval_target,
+            AuthorityRole::Administrator,
+            self.record.revision_counter(),
+        ) {
+            return response;
+        }
+
         match self.record.execute_zeroize() {
             Ok(result) => {
+                self.consume_approval_ticket(
+                    ProtectedActionClass::DestructiveAdmin,
+                    ApprovalTargetBinding::Device,
+                    approval_target,
+                );
                 self.key_store = PersistentKeyStore::new(self.record.revision_counter());
+                clear_approval_tickets(&mut self.approval_tickets);
                 self.invalidate_authenticated_session_only();
                 let payload = encode_zeroize_payload(result);
                 status_response(StatusCode::Success, &payload)
@@ -831,6 +1070,7 @@ impl ProtocolEngine {
         let payload = encode_developer_reset_payload(self.record.developer_reset());
         self.key_store = PersistentKeyStore::new(self.record.revision_counter());
         clear_failure_counters(&mut self.auth_snapshot.failure_counters);
+        clear_approval_tickets(&mut self.approval_tickets);
         self.invalidate_session();
         status_response(StatusCode::Success, &payload)
     }
@@ -852,6 +1092,7 @@ impl ProtocolEngine {
 
         match self.key_store.put_persistent_key(&request) {
             Ok(result) => {
+                self.invalidate_policy_tickets();
                 let payload = encode_key_record_result_payload(result);
                 status_response(StatusCode::Success, &payload)
             }
@@ -917,6 +1158,7 @@ impl ProtocolEngine {
 
         match self.key_store.revoke_key(key_id) {
             Ok(result) => {
+                self.invalidate_policy_tickets();
                 let payload = encode_key_record_result_payload(result);
                 status_response(StatusCode::Success, &payload)
             }
@@ -940,8 +1182,42 @@ impl ProtocolEngine {
                 Err(status) => return status_response(status, &[]),
             };
 
+        let metadata = match self.key_store.get_key_metadata(key_id) {
+            Ok(view) => view,
+            Err(status) => return status_response(status, &[]),
+        };
+        let key_policy = evaluate_key_policy(
+            metadata,
+            None,
+            0,
+            false,
+            &[KeyLifecycleState::Active, KeyLifecycleState::Revoked],
+        );
+        if !key_policy.decision {
+            return policy_status_response(
+                status_for_denial_class(key_policy.denial_class),
+                key_policy.denial_class,
+                None,
+            );
+        }
+        if let Err(response) = self.maybe_create_or_confirm_approval(
+            ProtectedActionClass::DestructiveKey,
+            ApprovalTargetBinding::KeyId,
+            u32::from(key_id),
+            AuthorityRole::KeyManager,
+            metadata.record_revision,
+        ) {
+            return response;
+        }
+
         match self.key_store.destroy_key(key_id) {
             Ok(result) => {
+                self.consume_approval_ticket(
+                    ProtectedActionClass::DestructiveKey,
+                    ApprovalTargetBinding::KeyId,
+                    u32::from(key_id),
+                );
+                self.invalidate_policy_tickets();
                 let payload = encode_key_destroy_payload(result);
                 status_response(StatusCode::Success, &payload)
             }
@@ -969,6 +1245,29 @@ impl ProtocolEngine {
         if request.algorithm != KeyAlgorithm::Ed25519 {
             clear_bytes(inner.as_mut_slice());
             return status_response(StatusCode::AuthorizationError, &[]);
+        }
+
+        let metadata = match self.key_store.get_key_metadata(request.key_id) {
+            Ok(view) => view,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let key_policy = evaluate_key_policy(
+            metadata,
+            Some(KeyAlgorithm::Ed25519),
+            USAGE_SIGN,
+            false,
+            &[KeyLifecycleState::Active],
+        );
+        if !key_policy.decision {
+            clear_bytes(inner.as_mut_slice());
+            return policy_status_response(
+                status_for_denial_class(key_policy.denial_class),
+                key_policy.denial_class,
+                None,
+            );
         }
 
         let mut key_bytes = match self
@@ -1084,6 +1383,28 @@ impl ProtocolEngine {
             clear_bytes(inner.as_mut_slice());
             return status_response(StatusCode::AuthorizationError, &[]);
         }
+        let metadata = match self.key_store.get_key_metadata(request.wrapping_key_id) {
+            Ok(view) => view,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let key_policy = evaluate_key_policy(
+            metadata,
+            Some(KeyAlgorithm::Aes256),
+            USAGE_WRAP_IMPORT,
+            false,
+            &[KeyLifecycleState::Active],
+        );
+        if !key_policy.decision {
+            clear_bytes(inner.as_mut_slice());
+            return policy_status_response(
+                status_for_denial_class(key_policy.denial_class),
+                key_policy.denial_class,
+                None,
+            );
+        }
         let mut wrapping_key = match self.key_store.export_key_material_for_operation(
             request.wrapping_key_id,
             KeyAlgorithm::Aes256,
@@ -1127,6 +1448,7 @@ impl ProtocolEngine {
         clear_bytes(inner.as_mut_slice());
         match import_result {
             Ok(result) => {
+                self.invalidate_policy_tickets();
                 self.crypto_state.note_wrapped_import(result.store_revision);
                 let payload = encode_key_record_result_payload(result);
                 status_response(StatusCode::Success, &payload)
@@ -1155,6 +1477,28 @@ impl ProtocolEngine {
 
         self.pending_firmware_action = Some(FirmwareAction::DeveloperReboot);
         status_response(StatusCode::Success, &[])
+    }
+
+    fn handle_developer_set_policy(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        match frame.payload.as_slice() {
+            [] => status_response(
+                StatusCode::Success,
+                &encode_policy_profile_payload(self.policy_profile),
+            ),
+            [dual_control] if *dual_control <= 1 => {
+                if self.policy_profile.dual_control_enabled != (*dual_control != 0) {
+                    self.policy_profile.dual_control_enabled = *dual_control != 0;
+                    self.policy_profile.policy_revision =
+                        self.policy_profile.policy_revision.saturating_add(1);
+                }
+                self.policy_profile.developer_commands_visible = self.developer_mode;
+                status_response(
+                    StatusCode::Success,
+                    &encode_policy_profile_payload(self.policy_profile),
+                )
+            }
+            _ => status_response(StatusCode::ValidationError, &[]),
+        }
     }
 
     fn decode_error_response(err: DecodeError) -> ProtocolFrame {
