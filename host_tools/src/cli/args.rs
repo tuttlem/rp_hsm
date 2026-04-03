@@ -23,6 +23,7 @@ pub enum CommandSpec {
     DeveloperReboot,
     DeveloperStoreFault { action: DeveloperFaultAction },
     DeveloperSetPolicy { update: PolicyProfileUpdate },
+    Provision { proof_env: String, label: String },
     ProvisionBootstrap { proof_env: String, label: String },
     AuthCheck { auth: AuthOptions },
     Lock { auth: AuthOptions },
@@ -33,6 +34,7 @@ pub enum CommandSpec {
     RecoverToProvisioned { auth: AuthOptions },
     ReactivateRecovered { transition_id: u32, auth: AuthOptions },
     GetRandom { bytes: u8, auth: AuthOptions },
+    GetAuditPage { start_sequence: u32, max_events: u8, auth: AuthOptions },
     Sign { key_id: u8, auth: AuthOptions },
     Verify {
         algorithm: VerifyAlgorithm,
@@ -87,6 +89,8 @@ where
     let mut transition_id = None;
     let mut action = None;
     let mut dual_control = None;
+    let mut start_sequence = None;
+    let mut max_events = None;
 
     let mut idx = 0usize;
     while idx < rest.len() {
@@ -188,6 +192,20 @@ where
                 };
                 dual_control = Some(parse_toggle(value)?);
             }
+            "--start-sequence" => {
+                idx += 1;
+                let Some(value) = rest.get(idx) else {
+                    return Err(CliError::usage("missing value for --start-sequence"));
+                };
+                start_sequence = Some(parse_u32(value)?);
+            }
+            "--max-events" => {
+                idx += 1;
+                let Some(value) = rest.get(idx) else {
+                    return Err(CliError::usage("missing value for --max-events"));
+                };
+                max_events = Some(parse_u8(value)?);
+            }
             "--help" | "-h" => {
                 return Err(CliError::usage(command_usage(&command_name, show_all_help)));
             }
@@ -210,6 +228,8 @@ where
         transition_id,
         action,
         dual_control,
+        start_sequence,
+        max_events,
     )?;
 
     Ok(ParsedArgs { global, command })
@@ -274,6 +294,8 @@ fn build_command(
     transition_id: Option<u32>,
     action: Option<DeveloperFaultAction>,
     dual_control: Option<bool>,
+    start_sequence: Option<u32>,
+    max_events: Option<u8>,
 ) -> Result<CommandSpec, CliError> {
     match command_name.as_str() {
         "find" => Ok(CommandSpec::Find),
@@ -286,7 +308,7 @@ fn build_command(
                 })?,
             },
         }),
-        "provision" => Ok(CommandSpec::ProvisionBootstrap {
+        "provision" => Ok(CommandSpec::Provision {
             proof_env: proof_env
                 .ok_or_else(|| CliError::usage("missing --proof-env for provision"))?,
             label: label.unwrap_or_else(|| "lab".to_string()),
@@ -342,6 +364,11 @@ fn build_command(
         "get-random" => Ok(CommandSpec::GetRandom {
             bytes: bytes.ok_or_else(|| CliError::usage("missing --bytes for get-random"))?,
             auth: parse_auth(role, proof_env, &[Role::Administrator, Role::KeyManager])?,
+        }),
+        "get-audit-page" | "audit-page" => Ok(CommandSpec::GetAuditPage {
+            start_sequence: start_sequence.unwrap_or(0),
+            max_events: max_events.ok_or_else(|| CliError::usage("missing --max-events for get-audit-page"))?,
+            auth: parse_auth(role, proof_env, &[Role::Administrator, Role::Recovery])?,
         }),
         "sign" | "key-sign" => Ok(CommandSpec::Sign {
             key_id: key_id.ok_or_else(|| CliError::usage("missing --key-id for sign"))?,
@@ -430,8 +457,8 @@ fn command_usage(command: &str, show_all_help: bool) -> String {
         "dev-reset" => "Usage: rphsmtool dev reset [--device PATH] [--baud 115200]".into(),
         "developer-reboot" => "Usage: rphsmtool developer-reboot [--device PATH] [--baud 115200]".into(),
         "dev-reboot" => "Usage: rphsmtool dev reboot [--device PATH] [--baud 115200]".into(),
-        "developer-store-fault" => "Usage: rphsmtool developer-store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store [--baud 115200]".into(),
-        "dev-store-fault" => "Usage: rphsmtool dev store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store [--baud 115200]".into(),
+        "developer-store-fault" => "Usage: rphsmtool developer-store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store|corrupt-persisted-audit|rollback-persisted-audit [--baud 115200]".into(),
+        "dev-store-fault" => "Usage: rphsmtool dev store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store|corrupt-persisted-audit|rollback-persisted-audit [--baud 115200]".into(),
         "developer-set-policy" => "Usage: rphsmtool developer-set-policy [--device PATH] --dual-control on|off [--baud 115200]".into(),
         "dev-set-policy" => "Usage: rphsmtool dev set-policy [--device PATH] --dual-control on|off [--baud 115200]".into(),
         "provision-bootstrap" => "Usage: rphsmtool provision-bootstrap [--device PATH] --proof-env VAR [--label NAME] [--baud 115200]".into(),
@@ -444,6 +471,7 @@ fn command_usage(command: &str, show_all_help: bool) -> String {
         "recover-to-provisioned" => "Usage: rphsmtool recover-to-provisioned [--device PATH] --role recovery --proof-env VAR [--baud 115200]".into(),
         "reactivate-recovered" => "Usage: rphsmtool reactivate-recovered [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]".into(),
         "get-random" => "Usage: rphsmtool get-random [--device PATH] --bytes N --role administrator|key-manager --proof-env VAR [--baud 115200]".into(),
+        "get-audit-page" => "Usage: rphsmtool get-audit-page [--device PATH] [--start-sequence N] --max-events N --role administrator|recovery --proof-env VAR [--baud 115200]".into(),
         "sign" => "Usage: rphsmtool sign [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin".into(),
         "verify" => "Usage: rphsmtool verify [--device PATH] --algorithm ed25519|p256 --public-key-hex HEX --signature-hex HEX [--baud 115200] < message.bin".into(),
         "import-wrapped-key" => "Usage: rphsmtool import-wrapped-key [--device PATH] --role key-manager --proof-env VAR [--baud 115200] < envelope.bin".into(),
@@ -486,6 +514,7 @@ pub fn usage_text() -> String {
         "  rphsmtool logout [--device PATH] --role bootstrap|administrator|recovery|key-manager --proof-env VAR [--baud 115200]",
         "",
         "Advanced Commands:",
+        "  rphsmtool get-audit-page [--device PATH] [--start-sequence N] --max-events N --role administrator|recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool recovery enter [--device PATH] --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool recovery recover [--device PATH] --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool recovery reactivate [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]",
@@ -496,7 +525,7 @@ pub fn usage_text() -> String {
         "Developer Commands:",
         "  rphsmtool dev reset [--device PATH] [--baud 115200]",
         "  rphsmtool dev reboot [--device PATH] [--baud 115200]",
-        "  rphsmtool dev store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store [--baud 115200]",
+        "  rphsmtool dev store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store|corrupt-persisted-audit|rollback-persisted-audit [--baud 115200]",
         "  rphsmtool dev set-policy [--device PATH] --dual-control on|off [--baud 115200]",
         "",
         "Policy Notes:",
@@ -520,8 +549,8 @@ pub fn all_usage_text() -> String {
         "  rphsmtool dev reset [--device PATH] [--baud 115200]",
         "  rphsmtool developer-reboot [--device PATH] [--baud 115200]",
         "  rphsmtool dev reboot [--device PATH] [--baud 115200]",
-        "  rphsmtool developer-store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store [--baud 115200]",
-        "  rphsmtool dev store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store [--baud 115200]",
+        "  rphsmtool developer-store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store|corrupt-persisted-audit|rollback-persisted-audit [--baud 115200]",
+        "  rphsmtool dev store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store|corrupt-persisted-audit|rollback-persisted-audit [--baud 115200]",
         "  rphsmtool developer-set-policy [--device PATH] --dual-control on|off [--baud 115200]",
         "  rphsmtool dev set-policy [--device PATH] --dual-control on|off [--baud 115200]",
         "  rphsmtool provision [--device PATH] --proof-env VAR [--label NAME] [--baud 115200]",
@@ -538,6 +567,7 @@ pub fn all_usage_text() -> String {
         "  rphsmtool reactivate-recovered [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool recovery reactivate [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool get-random [--device PATH] --bytes N --role administrator|key-manager --proof-env VAR [--baud 115200]",
+        "  rphsmtool get-audit-page [--device PATH] [--start-sequence N] --max-events N --role administrator|recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool sign [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin",
         "  rphsmtool key sign [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin",
         "  rphsmtool verify [--device PATH] --algorithm ed25519|p256 --public-key-hex HEX --signature-hex HEX [--baud 115200] < message.bin",
@@ -610,6 +640,19 @@ mod tests {
         .expect("parse");
         match parsed.command {
             CommandSpec::ProvisionBootstrap { proof_env, label } => {
+                assert_eq!(proof_env, "RPHSM_BOOT");
+                assert_eq!(label, "lab");
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn parses_high_level_provision_with_defaults() {
+        let parsed = parse(&["rphsmtool", "provision", "--proof-env", "RPHSM_BOOT"])
+            .expect("parse");
+        match parsed.command {
+            CommandSpec::Provision { proof_env, label } => {
                 assert_eq!(proof_env, "RPHSM_BOOT");
                 assert_eq!(label, "lab");
             }

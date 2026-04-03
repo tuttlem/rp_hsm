@@ -123,11 +123,8 @@ Policy-enforcement note:
   ambiguity.
 - The persisted policy profile defaults to the single-reviewed-path behavior so
   existing operator flows remain usable.
-- Dual-control approval-ticket behavior is implemented and covered by protocol
-  tests, but there is not yet a runtime host command to toggle that policy on a
-  live device. Hardware probe coverage therefore validates the bounded denial
-  surface and reviewed default path, while dual-control approval semantics are
-  regression-tested in the protocol crate.
+- `developer-set-policy` can now toggle `dual_control_enabled` on a live
+  developer-mode device for lab validation of approval-ticket flows.
 
 Important:
 
@@ -189,6 +186,7 @@ cargo rphsmtool status --device /dev/ttyACM0
 cargo rphsmtool developer-reset --device /dev/ttyACM0
 cargo rphsmtool developer-reboot --device /dev/ttyACM0
 cargo rphsmtool developer-store-fault --device /dev/ttyACM0 --action rollback-persisted-store
+cargo rphsmtool developer-store-fault --device /dev/ttyACM0 --action corrupt-persisted-audit
 cargo rphsmtool developer-set-policy --device /dev/ttyACM0 --dual-control on
 cargo rphsmtool provision-bootstrap --device /dev/ttyACM0 --proof-env RPHSM_PROOF
 cargo rphsmtool auth-check --device /dev/ttyACM0 --role administrator --proof-env RPHSM_PROOF
@@ -200,6 +198,7 @@ cargo rphsmtool enter-recovery --device /dev/ttyACM0 --role recovery --proof-env
 cargo rphsmtool recover-to-provisioned --device /dev/ttyACM0 --role recovery --proof-env RPHSM_PROOF
 cargo rphsmtool reactivate-recovered --device /dev/ttyACM0 --transition-id 7 --role recovery --proof-env RPHSM_PROOF
 cargo rphsmtool get-random --device /dev/ttyACM0 --bytes 32 --role administrator --proof-env RPHSM_PROOF
+cargo rphsmtool get-audit-page --device /dev/ttyACM0 --start-sequence 0 --max-events 4 --role administrator --proof-env RPHSM_PROOF
 cargo rphsmtool sign --device /dev/ttyACM0 --key-id 1 --role key-manager --proof-env RPHSM_PROOF < message.bin > signature.bin
 cargo rphsmtool verify --device /dev/ttyACM0 --algorithm ed25519 --public-key-hex <HEX> --signature-hex <HEX> < message.bin
 cargo rphsmtool import-wrapped-key --device /dev/ttyACM0 --role key-manager --proof-env RPHSM_PROOF < envelope.bin
@@ -232,6 +231,8 @@ Behavior:
 - If multiple compatible devices are present, the command fails closed and
   requires `--device`.
 - `get-random` writes raw bytes to stdout and sends any diagnostics to stderr.
+- `get-audit-page` writes bounded audit entry metadata to stdout and keeps
+  secret-bearing request material out of the rendered output.
 - `sign` writes raw signature bytes to stdout.
 - `verify` reads the message from stdin and writes `true` or `false` to stdout.
 - Authentication proof input is taken from `--proof-env <VAR>` to avoid putting
@@ -256,8 +257,34 @@ cargo rphsmtool get-random --device /dev/ttyACM0 --bytes 16 --role administrator
 ```
 
 ```bash
+cargo rphsmtool get-audit-page --device /dev/ttyACM0 --start-sequence 0 --max-events 4 --role administrator --proof-env RPHSM_PROOF
+```
+
+```bash
 cargo rphsmtool find
 ```
+
+### Audit and Health Validation
+
+`007-audit-trail` adds two operator-facing observability surfaces:
+
+- `status`, which now includes a redacted health summary
+- `get-audit-page`, which returns a bounded authorized audit page
+
+Typical validation flow:
+
+```bash
+cargo rphsmtool developer-reset --device /dev/ttyACM0
+export RPHSM_PROOF=BOOT
+cargo rphsmtool provision --device /dev/ttyACM0 --proof-env RPHSM_PROOF
+export RPHSM_PROOF=ADMIN
+cargo rphsmtool get-random --device /dev/ttyACM0 --bytes 16 --role administrator --proof-env RPHSM_PROOF > /tmp/random.bin
+cargo rphsmtool status --device /dev/ttyACM0
+cargo rphsmtool get-audit-page --device /dev/ttyACM0 --start-sequence 0 --max-events 4 --role administrator --proof-env RPHSM_PROOF
+```
+
+The audit page output is metadata-only. It does not expose key material,
+authentication proofs, wrapped-key envelopes, or other raw secret payloads.
 
 If serial permissions require a group such as `uucp`, run the command from a
 shell with that group applied or after logging back in with updated group

@@ -39,11 +39,13 @@ fn main() -> Result<(), DynError> {
     probe_public_catalog(&mut *port)?;
     probe_unauthenticated_denial(&mut *port)?;
     probe_crypto_capabilities(&mut *port)?;
+    probe_health_status(&mut *port, &[0x01, 0x01, 0x05])?;
 
     let bootstrap = authenticate(&mut *port, "Bootstrap", 0x02, b"BOOT")?;
     let transition_id = begin_provisioning(&mut *port, bootstrap, 2)?;
     finalize_provisioning(&mut *port, bootstrap, 3, transition_id)?;
     probe_lifecycle_status(&mut *port, &[0x03, 0x01, 0x00, 0x00])?;
+    probe_health_status(&mut *port, &[0x03, 0x01, 0x05])?;
 
     let admin = authenticate(&mut *port, "Administrator", 0x03, b"ADMIN")?;
     lock_device(&mut *port, admin, 2)?;
@@ -76,6 +78,7 @@ fn main() -> Result<(), DynError> {
     replay_list_denied(&mut *port, key_manager, 2)?;
     invalidate_session(&mut *port, key_manager, 3)?;
     expect_session_inactive(&mut *port)?;
+    retrieve_audit_page(&mut *port, admin, 3)?;
 
     set_dual_control(&mut *port, true)?;
     let key_manager = authenticate(&mut *port, "KeyManagerDestroyOne", 0x06, b"KEYMG")?;
@@ -121,7 +124,7 @@ fn main() -> Result<(), DynError> {
     let _port = reset_to_factory(&config, port)?;
 
     println!(
-        "All developer-mode authentication, session, and crypto probes passed on {}",
+        "All developer-mode authentication, session, crypto, and audit probes passed on {}",
         config.port_name
     );
     Ok(())
@@ -254,6 +257,26 @@ fn probe_unauthenticated_denial(port: &mut dyn serialport::SerialPort) -> Result
         &request(0x80, 0x02, &authorized_payload([0, 0, 0, 0], 1, b"lab")),
     )?;
     expect_status(&response, StatusCode::AuthorizationError)
+}
+
+fn probe_health_status(
+    port: &mut dyn serialport::SerialPort,
+    expected_prefix: &[u8],
+) -> Result<(), DynError> {
+    let response = exchange(port, "GetHealthStatus", &request(0x0c, 0x00, &[]))?;
+    expect_status(&response, StatusCode::Success)?;
+    if response.payload.len() != 13 {
+        return Err(format!("unexpected health payload length {}", response.payload.len()).into());
+    }
+    if &response.payload.as_slice()[0..expected_prefix.len()] != expected_prefix {
+        return Err(format!(
+            "unexpected health prefix: expected {}, got {}",
+            hex(expected_prefix),
+            hex(&response.payload.as_slice()[0..expected_prefix.len()])
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn authenticate(
@@ -539,6 +562,54 @@ fn invalidate_session(
         &request(0x09, 0x02, &authorized_payload(session_id, counter, &[])),
     )?;
     expect_status(&response, StatusCode::Success)
+}
+
+fn retrieve_audit_page(
+    port: &mut dyn serialport::SerialPort,
+    session_id: [u8; 4],
+    counter: u32,
+) -> Result<(), DynError> {
+    let response = exchange(
+        port,
+        "GetAuditPage",
+        &request(0x0d, 0x02, &authorized_payload(session_id, counter, &[0, 0, 0, 0, 4])),
+    )?;
+    expect_status(&response, StatusCode::Success)?;
+    let payload = response.payload.as_slice();
+    if payload.len() < 6 {
+        return Err("audit page payload is truncated".into());
+    }
+    let entry_count = usize::from(payload[0]);
+    if entry_count == 0 {
+        return Err("audit page returned no entries".into());
+    }
+    let mut cursor = 6usize;
+    let mut previous_sequence = 0u32;
+    for _ in 0..entry_count {
+        if payload.len() < cursor + 14 {
+            return Err("audit entry header is truncated".into());
+        }
+        let sequence = u32::from_le_bytes([
+            payload[cursor],
+            payload[cursor + 1],
+            payload[cursor + 2],
+            payload[cursor + 3],
+        ]);
+        if sequence <= previous_sequence {
+            return Err("audit sequence ordering is not monotonic".into());
+        }
+        previous_sequence = sequence;
+        let detail_len = usize::from(payload[cursor + 13]);
+        cursor += 14;
+        if payload.len() < cursor + detail_len {
+            return Err("audit entry detail is truncated".into());
+        }
+        cursor += detail_len;
+    }
+    if cursor != payload.len() {
+        return Err("audit page payload has trailing bytes".into());
+    }
+    Ok(())
 }
 
 fn expect_session_inactive(port: &mut dyn serialport::SerialPort) -> Result<(), DynError> {

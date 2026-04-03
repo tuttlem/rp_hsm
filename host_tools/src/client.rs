@@ -78,6 +78,34 @@ pub struct StatusReport {
     pub session_status: [u8; 6],
     pub crypto_capabilities: Option<[u8; 10]>,
     pub policy_profile: Option<[u8; 9]>,
+    pub health_status: Option<[u8; 13]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuditEntryRecord {
+    pub sequence_id: u32,
+    pub event_class: u8,
+    pub event_code: u8,
+    pub device_revision: u32,
+    pub lifecycle_state: u8,
+    pub actor_role: u8,
+    pub session_kind: u8,
+    pub result_class: u8,
+    pub detail: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuditPage {
+    pub entries: Vec<AuditEntryRecord>,
+    pub next_sequence: Option<u32>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProvisionResult {
+    pub result_state: u8,
+    pub transition_id: u32,
+    pub revision_counter: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,6 +128,8 @@ pub struct SessionContext {
 pub enum DeveloperFaultAction {
     CorruptPersistedStore = 0x01,
     RollbackPersistedStore = 0x02,
+    CorruptPersistedAudit = 0x03,
+    RollbackPersistedAudit = 0x04,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +145,8 @@ impl DeveloperFaultAction {
         match value {
             "corrupt-persisted-store" | "corrupt" => Ok(Self::CorruptPersistedStore),
             "rollback-persisted-store" | "rollback" => Ok(Self::RollbackPersistedStore),
+            "corrupt-persisted-audit" | "corrupt-audit" => Ok(Self::CorruptPersistedAudit),
+            "rollback-persisted-audit" | "rollback-audit" => Ok(Self::RollbackPersistedAudit),
             _ => Err(CliError::usage("invalid developer store fault action")),
         }
     }
@@ -218,7 +250,7 @@ impl SerialBackend {
             )));
         };
         let policy_request =
-            ProtocolFrame::new(MessageKind::Request, 0x97, 0x02, &[]).unwrap_or_default();
+            ProtocolFrame::new(MessageKind::Request, 0x97, 0x00, &[]).unwrap_or_default();
         let policy = exchange_frame(&mut *port, &policy_request)?;
         let policy_profile = if policy.code == StatusCode::Success.as_u8() {
             Some(copy_array::<9>(policy.payload.as_slice())?)
@@ -228,6 +260,19 @@ impl SerialBackend {
             return Err(CliError::invalid_response(format!(
                 "unexpected policy status {:02x}",
                 policy.code
+            )));
+        };
+        let health_request =
+            ProtocolFrame::new(MessageKind::Request, 0x0c, 0x00, &[]).unwrap_or_default();
+        let health = exchange_frame(&mut *port, &health_request)?;
+        let health_status = if health.code == StatusCode::Success.as_u8() {
+            Some(copy_array::<13>(health.payload.as_slice())?)
+        } else if health.code == StatusCode::CommandError.as_u8() {
+            None
+        } else {
+            return Err(CliError::invalid_response(format!(
+                "unexpected health status {:02x}",
+                health.code
             )));
         };
 
@@ -241,6 +286,77 @@ impl SerialBackend {
             session_status: copy_array::<6>(session.payload.as_slice())?,
             crypto_capabilities,
             policy_profile,
+            health_status,
+        })
+    }
+
+    /// # Errors
+    ///
+    /// Returns `CliError` when audit authentication, retrieval, or page decoding fails.
+    pub fn get_audit_page(
+        &self,
+        role: Role,
+        proof: &[u8],
+        start_sequence: u32,
+        max_events: u8,
+    ) -> Result<AuditPage, CliError> {
+        let mut port = open_port(&self.config)?;
+        let mut session = authenticate_on_port(&mut *port, role, proof)?;
+        let inner = [
+            start_sequence.to_le_bytes()[0],
+            start_sequence.to_le_bytes()[1],
+            start_sequence.to_le_bytes()[2],
+            start_sequence.to_le_bytes()[3],
+            max_events,
+        ];
+        let response = exchange_authorized(&mut *port, &mut session, 0x0d, 0x02, &inner)?;
+        ensure_status(&response, StatusCode::Success)?;
+        decode_audit_page(response.payload.as_slice())
+    }
+
+    /// # Errors
+    ///
+    /// Returns `CliError` when bootstrap authentication or either provisioning
+    /// transition step fails.
+    pub fn provision(&self, proof: &[u8], label: &[u8]) -> Result<ProvisionResult, CliError> {
+        if label.is_empty() || label.len() > 16 {
+            return Err(CliError::usage("provisioning label must be between 1 and 16 bytes"));
+        }
+        let mut port = open_port(&self.config)?;
+        let mut session = authenticate_on_port(&mut *port, Role::Bootstrap, proof)?;
+
+        let begin = exchange_authorized(&mut *port, &mut session, 0x80, 0x02, label)?;
+        ensure_status(&begin, StatusCode::Success)?;
+        let begin_payload = copy_array::<9>(begin.payload.as_slice())?;
+        let transition_id = u32::from_le_bytes([
+            begin_payload[1],
+            begin_payload[2],
+            begin_payload[3],
+            begin_payload[4],
+        ]);
+
+        let finalize_inner = [
+            begin_payload[1],
+            begin_payload[2],
+            begin_payload[3],
+            begin_payload[4],
+            finalize_marker(),
+        ];
+        let finalize =
+            exchange_authorized(&mut *port, &mut session, 0x81, 0x02, &finalize_inner)?;
+        ensure_status(&finalize, StatusCode::Success)?;
+        thread::sleep(Duration::from_millis(200));
+        let finalize_payload = copy_array::<5>(finalize.payload.as_slice())?;
+
+        Ok(ProvisionResult {
+            result_state: finalize_payload[0],
+            transition_id,
+            revision_counter: u32::from_le_bytes([
+                finalize_payload[1],
+                finalize_payload[2],
+                finalize_payload[3],
+                finalize_payload[4],
+            ]),
         })
     }
 
@@ -805,6 +921,67 @@ fn decode_key_list(payload: &[u8]) -> Result<Vec<KeyListRecord>, CliError> {
         });
     }
     Ok(keys)
+}
+
+fn decode_audit_page(payload: &[u8]) -> Result<AuditPage, CliError> {
+    if payload.len() < 7 {
+        return Err(CliError::invalid_response("audit page is truncated"));
+    }
+    let count = usize::from(payload[0]);
+    let next_present = payload[1] != 0;
+    let next_sequence = u32::from_le_bytes([payload[2], payload[3], payload[4], payload[5]]);
+    let truncated = payload[6] != 0;
+    let mut cursor = 7usize;
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        if payload.len() < cursor + 15 {
+            return Err(CliError::invalid_response("audit entry header is truncated"));
+        }
+        let sequence_id = u32::from_le_bytes([
+            payload[cursor],
+            payload[cursor + 1],
+            payload[cursor + 2],
+            payload[cursor + 3],
+        ]);
+        let event_class = payload[cursor + 4];
+        let event_code = payload[cursor + 5];
+        let device_revision = u32::from_le_bytes([
+            payload[cursor + 6],
+            payload[cursor + 7],
+            payload[cursor + 8],
+            payload[cursor + 9],
+        ]);
+        let lifecycle_state = payload[cursor + 10];
+        let actor_role = payload[cursor + 11];
+        let session_kind = payload[cursor + 12];
+        let result_class = payload[cursor + 13];
+        let detail_len = usize::from(payload[cursor + 14]);
+        cursor += 15;
+        if payload.len() < cursor + detail_len {
+            return Err(CliError::invalid_response("audit entry detail is truncated"));
+        }
+        let detail = payload[cursor..cursor + detail_len].to_vec();
+        cursor += detail_len;
+        entries.push(AuditEntryRecord {
+            sequence_id,
+            event_class,
+            event_code,
+            device_revision,
+            lifecycle_state,
+            actor_role,
+            session_kind,
+            result_class,
+            detail,
+        });
+    }
+    if cursor != payload.len() {
+        return Err(CliError::invalid_response("unexpected trailing bytes in audit page"));
+    }
+    Ok(AuditPage {
+        entries,
+        next_sequence: next_present.then_some(next_sequence),
+        truncated,
+    })
 }
 
 fn settle_after_flash_mutation() {

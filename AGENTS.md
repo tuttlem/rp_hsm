@@ -15,6 +15,8 @@ Auto-generated from all feature plans. Last updated: 2026-04-03
 - N/A for CLI-owned durable storage; transient in-memory handling only (014-rphsmtool-cli)
 - Rust 2024 edition with `no_std` firmware and std-based host tooling + existing `rp235x-hal`, `embedded-hal`, `heapless`, `critical-section`, shared `protocol` crate, flash-backed persistence layer, and current host tools / probes; no new third-party policy engine or dynamic rule runtime (006-policy-enforcement)
 - internal flash-backed persistent policy profile and bounded approval snapshots plus in-RAM policy-decision context and transient approval evaluation buffers (006-policy-enforcement)
+- Rust stable, workspace with `no_std` firmware and host-side Rust CLI + `heapless`, `usb-device`, `usbd-serial`, existing `protocol` shared crate, host-side `serialport` (007-audit-trail)
+- Reserved on-device flash via `firmware/src/persistence.rs`; bounded in-memory staging buffers only (007-audit-trail)
 
 - Rust edition 2024 (`no_std`) + `rp235x-hal`, `embedded-hal`, `heapless`, `critical-section`; existing USB support remains transport scaffolding only (001-secure-command-protocol)
 
@@ -34,9 +36,9 @@ cargo test [ONLY COMMANDS FOR ACTIVE TECHNOLOGIES][ONLY COMMANDS FOR ACTIVE TECH
 Rust edition 2024 (`no_std`): Follow standard conventions
 
 ## Recent Changes
+- 007-audit-trail: Added Rust stable, workspace with `no_std` firmware and host-side Rust CLI + `heapless`, `usb-device`, `usbd-serial`, existing `protocol` shared crate, host-side `serialport`
 - 006-policy-enforcement: Added Rust 2024 edition with `no_std` firmware and std-based host tooling + existing `rp235x-hal`, `embedded-hal`, `heapless`, `critical-section`, shared `protocol` crate, flash-backed persistence layer, and current host tools / probes; no new third-party policy engine or dynamic rule runtime
 - 014-rphsmtool-cli: Added Rust stable workspace, aligned with current Cargo workspace + existing `host_tools` crate, shared `protocol` crate, serial-port access crate already used by the probe, CLI argument parsing crate to be selected during implementation
-- 005-core-crypto-operations: Added Rust 2024 edition, `no_std` firmware on RP2350, host tooling on std Rust + existing `heapless`, `rp235x-hal`, `usb-device`, `usbd-serial`, plus reviewed RustCrypto/signature crates for Ed25519 verification/signing, digest handling, and zeroization-compatible secret containers
 
 
 <!-- MANUAL ADDITIONS START -->

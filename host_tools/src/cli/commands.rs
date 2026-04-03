@@ -1,6 +1,6 @@
 use crate::cli::args::{AuthOptions, CommandSpec, ParsedArgs};
 use crate::cli::device::{DiscoveredDevice, discover_devices, resolve_device_selector};
-use crate::cli::output::{CliError, CommandOutput, lines_output};
+use crate::cli::output::{CliError, CommandOutput, audit_page_lines, lines_output};
 use crate::client::{KeyListRecord, SerialBackend, SessionContext, StatusReport};
 use std::io::Read;
 
@@ -78,6 +78,19 @@ pub fn execute(parsed: ParsedArgs) -> Result<CommandOutput, CliError> {
                     u16::from_le_bytes([result[6], result[7]])
                 ),
                 format!("developer_commands_visible={}", yes_no(result[8] != 0)),
+            ]))
+        }
+        CommandSpec::Provision { proof_env, label } => {
+            let proof = load_named_proof(&proof_env)?;
+            let devices = discover_devices(parsed.global.baud)?;
+            let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
+            let result = SerialBackend::new(crate::client::ClientConfig::new(selected.clone(), parsed.global.baud))
+                .provision(&proof, label.as_bytes())?;
+            Ok(lines_output(&[
+                format!("device={selected}"),
+                format!("result_state={}", device_state_name(result.result_state)),
+                format!("transition_id={}", result.transition_id),
+                format!("revision_counter={}", result.revision_counter),
             ]))
         }
         CommandSpec::ProvisionBootstrap { proof_env, label } => {
@@ -201,6 +214,18 @@ pub fn execute(parsed: ParsedArgs) -> Result<CommandOutput, CliError> {
             let bytes = SerialBackend::new(crate::client::ClientConfig::new(selected, parsed.global.baud))
                 .get_random(auth.role, &proof, bytes)?;
             Ok(CommandOutput::Bytes(bytes))
+        }
+        CommandSpec::GetAuditPage {
+            start_sequence,
+            max_events,
+            auth,
+        } => {
+            let proof = load_proof(&auth)?;
+            let devices = discover_devices(parsed.global.baud)?;
+            let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
+            let page = SerialBackend::new(crate::client::ClientConfig::new(selected.clone(), parsed.global.baud))
+                .get_audit_page(auth.role, &proof, start_sequence, max_events)?;
+            Ok(lines_output(&audit_page_lines(&selected, &page)))
         }
         CommandSpec::Sign { key_id, auth } => {
             let proof = load_proof(&auth)?;
@@ -371,6 +396,23 @@ fn format_status(report: &StatusReport) -> Vec<String> {
         ));
         lines.push(format!("developer_commands_visible={}", yes_no(policy[8] != 0)));
     }
+    if let Some(health) = report.health_status {
+        lines.push(format!("health_device_state={}", device_state_name(health[0])));
+        lines.push(format!("health_key_store_state={}", key_store_state_name(health[1])));
+        lines.push(format!("health_session_state={}", session_state_name(health[2])));
+        lines.push(format!(
+            "health_policy_revision={}",
+            u32::from_le_bytes([health[3], health[4], health[5], health[6]])
+        ));
+        lines.push(format!("audit_store_state={}", audit_store_state_name(health[7])));
+        lines.push(format!(
+            "audit_events_retained={}",
+            u16::from_le_bytes([health[8], health[9]])
+        ));
+        lines.push(format!("audit_overflow_detected={}", yes_no(health[10] != 0)));
+        lines.push(format!("health_rollback_detected={}", yes_no(health[11] != 0)));
+        lines.push(format!("health_corruption_detected={}", yes_no(health[12] != 0)));
+    }
     lines
 }
 
@@ -415,6 +457,8 @@ fn developer_fault_name(action: crate::client::DeveloperFaultAction) -> &'static
     match action {
         crate::client::DeveloperFaultAction::CorruptPersistedStore => "corrupt-persisted-store",
         crate::client::DeveloperFaultAction::RollbackPersistedStore => "rollback-persisted-store",
+        crate::client::DeveloperFaultAction::CorruptPersistedAudit => "corrupt-persisted-audit",
+        crate::client::DeveloperFaultAction::RollbackPersistedAudit => "rollback-persisted-audit",
     }
 }
 
@@ -497,6 +541,17 @@ fn key_store_state_name(value: u8) -> &'static str {
     }
 }
 
+fn audit_store_state_name(value: u8) -> &'static str {
+    match value {
+        0x01 => "empty",
+        0x02 => "ready",
+        0x03 => "full",
+        0x04 => "degraded",
+        0x05 => "locked",
+        _ => "unknown",
+    }
+}
+
 fn algorithm_name(value: u8) -> &'static str {
     match value {
         0x01 => "ed25519",
@@ -551,6 +606,7 @@ mod tests {
             session_status: [0, 5, 0, 0, 0, 1],
             crypto_capabilities: Some([1, 0x0f, 1, 3, 0x80, 0x00, 0x40, 0x00, 0x40, 1]),
             policy_profile: Some([1, 0x02, 0x00, 0x00, 0x00, 1, 0x07, 0x00, 1]),
+            health_status: Some([1, 1, 5, 0x02, 0x00, 0x00, 0x00, 2, 0x04, 0x00, 0, 0, 0]),
         });
         assert!(lines.iter().any(|line| line == "device=/dev/ttyACM0"));
         assert!(lines.iter().any(|line| line == "wrapped_import_enabled=yes"));

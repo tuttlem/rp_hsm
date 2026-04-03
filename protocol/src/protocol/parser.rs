@@ -7,11 +7,12 @@ use ed25519_dalek::{Signer, Verifier};
 use p256::ecdsa::{Signature as P256Signature, VerifyingKey as P256VerifyingKey};
 
 use super::codec::{
-    DecodeError, StatusCode, clear_bytes, decode_authentication_role,
-    decode_authorized_payload, decode_complete_authentication_request, decode_frame,
-    decode_import_wrapped_key_request, decode_key_id_request, decode_key_marker_request,
-    decode_put_persistent_key_request, decode_random_request, decode_sign_request,
-    decode_transition_request, decode_verify_request, encode_auth_challenge_payload,
+    DecodeError, StatusCode, clear_bytes, decode_audit_page_request,
+    decode_authentication_role, decode_authorized_payload,
+    decode_complete_authentication_request, decode_frame, decode_import_wrapped_key_request,
+    decode_key_id_request, decode_key_marker_request, decode_put_persistent_key_request,
+    decode_random_request, decode_sign_request, decode_transition_request,
+    decode_verify_request, encode_audit_page_payload, encode_auth_challenge_payload,
     encode_auth_session_payload, encode_crypto_capabilities_payload,
     encode_developer_reset_payload, encode_device_status_payload, encode_key_destroy_payload,
     encode_key_list_payload, encode_key_metadata_payload, encode_key_record_result_payload,
@@ -19,22 +20,23 @@ use super::codec::{
     encode_policy_denial_payload, encode_policy_profile_payload, encode_random_payload,
     encode_recovery_result_payload, encode_session_status_payload, encode_signature_payload,
     encode_state_revision_payload, encode_transition_result_payload, encode_verify_result_payload,
-    encode_zeroize_payload, policy_status_response, protocol_version_response, status_response,
+    encode_zeroize_payload, encode_health_status_payload, policy_status_response,
+    protocol_version_response, status_response,
 };
 use super::command::{CommandId, get_visible_catalog, lookup_command};
 use super::frame::{
     FLAG_INCLUDE_RESTRICTED, FLAG_REPLAY_SENSITIVE, MessageKind, PROTOCOL_VERSION, ProtocolFrame,
 };
 use super::state::{
-    ApprovalTargetBinding, ApprovalTicket, ApprovalTicketState, AuthSnapshot,
-    AuthenticationChallenge, AuthorityRole, CryptoPersistentState, CryptoRuntimeState,
-    DenialClass, DeviceState, KeyAlgorithm, KeyLifecycleState, PersistentKeyStore,
-    PolicyProfile, ProtectedActionClass, ProvisioningRecord, ProvisioningSnapshot,
-    SessionLifecycleState, SessionRecord, SessionState, SessionTracker, USAGE_SIGN,
-    USAGE_WRAP_IMPORT, clear_active_session, clear_approval_tickets, clear_auth_failures,
-    clear_challenge, clear_failure_counters, clear_secret_array, current_session_state,
-    current_session_status, developer_mode_session, developer_reset_marker,
-    enforce_replay_policy, evaluate_command_policy, evaluate_key_policy,
+    ApprovalTargetBinding, ApprovalTicket, ApprovalTicketState, AuditEventClass, AuditEventCode,
+    AuditJournal, AuditResultClass, AuditStoreSnapshot, AuthSnapshot, AuthenticationChallenge,
+    AuthorityRole, CryptoPersistentState, CryptoRuntimeState, DenialClass, DeviceState,
+    KeyAlgorithm, KeyLifecycleState, PersistentKeyStore, PolicyProfile, ProtectedActionClass,
+    ProvisioningRecord, ProvisioningSnapshot, SessionLifecycleState, SessionRecord, SessionState,
+    SessionTracker, USAGE_SIGN, USAGE_WRAP_IMPORT, clear_active_session,
+    clear_approval_tickets, clear_auth_failures, clear_challenge, clear_failure_counters,
+    clear_secret_array, current_session_state, current_session_status, developer_mode_session,
+    developer_reset_marker, enforce_replay_policy, evaluate_command_policy, evaluate_key_policy,
     expect_marker_bytes, expect_single_marker, finalize_marker, find_credential,
     fingerprint_frame, invalidate_approval_tickets, issue_challenge_nonce, new_approval_ticket,
     reactivate_marker, record_auth_failure, recovery_marker, retain_active_approval_tickets,
@@ -46,6 +48,8 @@ use super::state::{
 pub enum DeveloperStoreFaultAction {
     CorruptPersistedStore = 0x01,
     RollbackPersistedStore = 0x02,
+    CorruptPersistedAudit = 0x03,
+    RollbackPersistedAudit = 0x04,
 }
 
 impl DeveloperStoreFaultAction {
@@ -54,6 +58,8 @@ impl DeveloperStoreFaultAction {
         match byte {
             0x01 => Some(Self::CorruptPersistedStore),
             0x02 => Some(Self::RollbackPersistedStore),
+            0x03 => Some(Self::CorruptPersistedAudit),
+            0x04 => Some(Self::RollbackPersistedAudit),
             _ => None,
         }
     }
@@ -70,6 +76,7 @@ pub struct ProtocolEngine {
     key_store: PersistentKeyStore,
     auth_snapshot: AuthSnapshot,
     crypto_state: CryptoRuntimeState,
+    audit_journal: AuditJournal,
     policy_profile: PolicyProfile,
     approval_tickets: Vec<ApprovalTicket, MAX_APPROVAL_TICKETS>,
     next_approval_ticket_id: u32,
@@ -92,6 +99,7 @@ impl ProtocolEngine {
             record,
             auth_snapshot: AuthSnapshot::default(),
             crypto_state: CryptoRuntimeState::default(),
+            audit_journal: AuditJournal::new(),
             policy_profile: PolicyProfile::default(),
             approval_tickets: Vec::new(),
             next_approval_ticket_id: 1,
@@ -154,6 +162,7 @@ impl ProtocolEngine {
         self.key_store
             .sync_device_revision(self.record.revision_counter());
         self.key_store.reconcile_after_boot();
+        self.audit_journal.reconcile_after_boot();
         invalidate_approval_tickets(&mut self.approval_tickets);
         retain_active_approval_tickets(&mut self.approval_tickets);
         clear_challenge(&mut self.active_challenge);
@@ -193,6 +202,11 @@ impl ProtocolEngine {
     }
 
     #[must_use]
+    pub fn audit_snapshot(&self) -> AuditStoreSnapshot {
+        self.audit_journal.snapshot()
+    }
+
+    #[must_use]
     pub fn approval_tickets(&self) -> &Vec<ApprovalTicket, MAX_APPROVAL_TICKETS> {
         &self.approval_tickets
     }
@@ -228,6 +242,10 @@ impl ProtocolEngine {
     pub fn restore_policy_profile(&mut self, profile: PolicyProfile) {
         self.policy_profile = profile;
         self.policy_profile.developer_commands_visible = self.developer_mode;
+    }
+
+    pub fn restore_audit_snapshot(&mut self, snapshot: AuditStoreSnapshot) {
+        self.audit_journal.restore_snapshot(snapshot);
     }
 
     pub fn restore_approval_tickets(
@@ -318,6 +336,42 @@ impl ProtocolEngine {
 
     fn current_session_id(&self) -> u32 {
         self.active_session.map_or(0, |session| session.session_id)
+    }
+
+    fn effective_actor_role(&self) -> AuthorityRole {
+        if self.developer_mode {
+            return AuthorityRole::Developer;
+        }
+        if let Some(session) = self.active_session {
+            return session.role;
+        }
+        match self.session_state {
+            SessionState::Bootstrap => AuthorityRole::Bootstrap,
+            SessionState::Administrator => AuthorityRole::Administrator,
+            SessionState::Recovery => AuthorityRole::Recovery,
+            SessionState::Developer => AuthorityRole::Developer,
+            SessionState::KeyManager => AuthorityRole::KeyManager,
+            SessionState::Unauthenticated => AuthorityRole::Public,
+        }
+    }
+
+    fn record_audit_event(
+        &mut self,
+        event_class: AuditEventClass,
+        event_code: AuditEventCode,
+        result_class: AuditResultClass,
+        detail: &[u8],
+    ) {
+        self.audit_journal.record(
+            event_class,
+            event_code,
+            self.record.revision_counter(),
+            self.record.current_state(),
+            self.effective_actor_role(),
+            self.session_state,
+            result_class,
+            detail,
+        );
     }
 
     #[allow(clippy::result_large_err)]
@@ -582,6 +636,12 @@ impl ProtocolEngine {
             self.policy_profile,
         );
         if !policy.decision {
+            self.record_audit_event(
+                AuditEventClass::SecurityDenial,
+                AuditEventCode::CommandDenied,
+                AuditResultClass::Denied,
+                &[frame.code, policy.denial_class as u8],
+            );
             let payload = encode_policy_denial_payload(policy.denial_class, policy.approval_ticket_id)
                 .unwrap_or_default();
             return status_response(status_for_denial_class(policy.denial_class), &payload);
@@ -611,6 +671,8 @@ impl ProtocolEngine {
             Some(CommandId::InvalidateSession) => self.handle_invalidate_session(frame),
             Some(CommandId::GetCryptoCapabilities) => self.handle_get_crypto_capabilities(),
             Some(CommandId::VerifyDetached) => Self::handle_verify_detached(frame),
+            Some(CommandId::GetHealthStatus) => self.handle_get_health_status(),
+            Some(CommandId::GetAuditPage) => self.handle_get_audit_page(frame),
             Some(CommandId::BeginProvisioning) => self.handle_begin_provisioning(frame),
             Some(CommandId::FinalizeProvisioning) => self.handle_finalize_provisioning(frame),
             Some(CommandId::LockDevice) => self.handle_lock_device(frame),
@@ -690,6 +752,87 @@ impl ProtocolEngine {
         status_response(StatusCode::Success, &payload)
     }
 
+    fn compose_health_status(&self) -> super::state::HealthStatusView {
+        super::state::HealthStatusView {
+            device_state: self.record.current_state(),
+            key_store_state: self.key_store.status().store_state,
+            session_state: self.session_state,
+            policy_revision: self.policy_profile.policy_revision,
+            audit_store_state: self.audit_journal.store_state(),
+            audit_events_retained: self.audit_journal.events_retained(),
+            audit_overflow_detected: self.audit_journal.overflow_detected(),
+            rollback_detected: self.key_store.status().rollback_detected,
+            corruption_detected: self.key_store.status().corruption_detected
+                || self.audit_journal.corruption_detected,
+        }
+    }
+
+    fn handle_get_health_status(&mut self) -> ProtocolFrame {
+        let payload = encode_health_status_payload(self.compose_health_status());
+        self.record_audit_event(
+            AuditEventClass::ObservabilityAccess,
+            AuditEventCode::HealthStatusViewed,
+            AuditResultClass::Success,
+            &[self.record.current_state() as u8, self.audit_journal.store_state() as u8],
+        );
+        status_response(StatusCode::Success, &payload)
+    }
+
+    fn handle_get_audit_page(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        let (_, inner, role) = match self.authorize_any_owned::<5>(
+            &[AuthorityRole::Administrator, AuthorityRole::Recovery],
+            frame.payload.as_slice(),
+            5,
+            5,
+        ) {
+            Ok(values) => values,
+            Err(status) => {
+                self.record_audit_event(
+                    AuditEventClass::ObservabilityAccess,
+                    AuditEventCode::AuditPageDenied,
+                    AuditResultClass::Denied,
+                    &[frame.code, status as u8],
+                );
+                return status_response(status, &[]);
+            }
+        };
+        let (start_sequence, max_events) = match decode_audit_page_request(inner.as_slice()) {
+            Ok(values) => values,
+            Err(status) => {
+                self.record_audit_event(
+                    AuditEventClass::ObservabilityAccess,
+                    AuditEventCode::AuditPageDenied,
+                    AuditResultClass::Denied,
+                    &[status as u8],
+                );
+                return status_response(status, &[]);
+            }
+        };
+        match self.audit_journal.page(start_sequence, max_events) {
+            Ok((page, cursor)) => {
+                self.record_audit_event(
+                    AuditEventClass::ObservabilityAccess,
+                    AuditEventCode::AuditPageViewed,
+                    AuditResultClass::Success,
+                    &[role as u8, u8::try_from(page.len()).unwrap_or(0)],
+                );
+                let Some(payload) = encode_audit_page_payload(page.as_slice(), cursor) else {
+                    return status_response(StatusCode::InternalError, &[]);
+                };
+                status_response(StatusCode::Success, &payload)
+            }
+            Err(status) => {
+                self.record_audit_event(
+                    AuditEventClass::ObservabilityAccess,
+                    AuditEventCode::AuditPageDenied,
+                    AuditResultClass::FailedClosed,
+                    &[self.audit_journal.store_state() as u8],
+                );
+                status_response(status, &[])
+            }
+        }
+    }
+
     fn handle_begin_authentication(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
         let role = match decode_authentication_role(frame.payload.as_slice()) {
             Ok(role) => role,
@@ -741,6 +884,12 @@ impl ProtocolEngine {
                 self.request_tick,
             );
             clear_challenge(&mut self.active_challenge);
+            self.record_audit_event(
+                AuditEventClass::SecurityDenial,
+                AuditEventCode::AuthenticationFailed,
+                AuditResultClass::Denied,
+                &[challenge.requested_role as u8],
+            );
             return status_response(StatusCode::AuthorizationError, &[]);
         }
         if request_counter <= challenge.request_counter_floor {
@@ -750,6 +899,12 @@ impl ProtocolEngine {
                 self.request_tick,
             );
             clear_challenge(&mut self.active_challenge);
+            self.record_audit_event(
+                AuditEventClass::SecurityDenial,
+                AuditEventCode::AuthenticationFailed,
+                AuditResultClass::Denied,
+                &[challenge.requested_role as u8],
+            );
             return status_response(StatusCode::ReplayError, &[]);
         }
         let Some(credential) = find_credential(&self.auth_snapshot, challenge.requested_role) else {
@@ -788,6 +943,12 @@ impl ProtocolEngine {
             timeout_ticks,
             request_counter.saturating_add(1),
         );
+        self.record_audit_event(
+            AuditEventClass::Administrative,
+            AuditEventCode::CommandCompleted,
+            AuditResultClass::Success,
+            &[CommandId::CompleteAuthentication as u8, challenge.requested_role as u8],
+        );
         status_response(StatusCode::Success, &payload)
     }
 
@@ -816,7 +977,14 @@ impl ProtocolEngine {
         if session.session_id != session_id || request_counter <= session.last_counter {
             return status_response(StatusCode::ReplayError, &[]);
         }
+        let invalidated_role = session.role;
         self.invalidate_session();
+        self.record_audit_event(
+            AuditEventClass::Administrative,
+            AuditEventCode::SessionInvalidated,
+            AuditResultClass::Success,
+            &[invalidated_role as u8],
+        );
         status_response(StatusCode::Success, &[SessionLifecycleState::Inactive as u8])
     }
 
@@ -833,6 +1001,12 @@ impl ProtocolEngine {
         match self.record.begin_provisioning(inner.as_slice(), frame.code) {
             Ok(result) => {
                 self.invalidate_policy_tickets();
+                self.record_audit_event(
+                    AuditEventClass::LifecycleTransition,
+                    AuditEventCode::CommandCompleted,
+                    AuditResultClass::Success,
+                    &[frame.code, result.state as u8],
+                );
                 let payload = encode_transition_result_payload(result);
                 status_response(StatusCode::Success, &payload)
             }
@@ -858,6 +1032,12 @@ impl ProtocolEngine {
         match self.record.finalize_provisioning(transition_id) {
             Ok(result) => {
                 self.invalidate_policy_tickets();
+                self.record_audit_event(
+                    AuditEventClass::LifecycleTransition,
+                    AuditEventCode::CommandCompleted,
+                    AuditResultClass::Success,
+                    &[frame.code, result.state as u8],
+                );
                 let payload = encode_state_revision_payload(result);
                 status_response(StatusCode::Success, &payload)
             }
@@ -878,6 +1058,12 @@ impl ProtocolEngine {
         match self.record.lock_device(inner[0]) {
             Ok(result) => {
                 self.invalidate_policy_tickets();
+                self.record_audit_event(
+                    AuditEventClass::LifecycleTransition,
+                    AuditEventCode::CommandCompleted,
+                    AuditResultClass::Success,
+                    &[frame.code, result.state as u8],
+                );
                 let payload = encode_lock_result_payload(result);
                 self.invalidate_authenticated_session_only();
                 status_response(StatusCode::Success, &payload)
@@ -903,6 +1089,12 @@ impl ProtocolEngine {
         match self.record.unlock_device() {
             Ok(result) => {
                 self.invalidate_policy_tickets();
+                self.record_audit_event(
+                    AuditEventClass::LifecycleTransition,
+                    AuditEventCode::CommandCompleted,
+                    AuditResultClass::Success,
+                    &[frame.code, result.state as u8],
+                );
                 let payload = encode_state_revision_payload(result);
                 self.invalidate_authenticated_session_only();
                 status_response(StatusCode::Success, &payload)
@@ -928,6 +1120,12 @@ impl ProtocolEngine {
         match self.record.enter_recovery() {
             Ok(result) => {
                 self.invalidate_policy_tickets();
+                self.record_audit_event(
+                    AuditEventClass::LifecycleTransition,
+                    AuditEventCode::CommandCompleted,
+                    AuditResultClass::Success,
+                    &[frame.code, result.state as u8],
+                );
                 let payload = encode_recovery_result_payload(result);
                 self.invalidate_authenticated_session_only();
                 status_response(StatusCode::Success, &payload)
@@ -969,6 +1167,12 @@ impl ProtocolEngine {
                     approval_target,
                 );
                 self.invalidate_policy_tickets();
+                self.record_audit_event(
+                    AuditEventClass::LifecycleTransition,
+                    AuditEventCode::CommandCompleted,
+                    AuditResultClass::Success,
+                    &[frame.code, result.state as u8],
+                );
                 let payload = encode_transition_result_payload(result);
                 self.invalidate_authenticated_session_only();
                 status_response(StatusCode::Success, &payload)
@@ -1011,6 +1215,12 @@ impl ProtocolEngine {
                     transition_id,
                 );
                 self.invalidate_policy_tickets();
+                self.record_audit_event(
+                    AuditEventClass::LifecycleTransition,
+                    AuditEventCode::CommandCompleted,
+                    AuditResultClass::Success,
+                    &[frame.code, result.state as u8],
+                );
                 let payload = encode_state_revision_payload(result);
                 self.invalidate_authenticated_session_only();
                 status_response(StatusCode::Success, &payload)
@@ -1052,6 +1262,16 @@ impl ProtocolEngine {
                     approval_target,
                 );
                 self.key_store = PersistentKeyStore::new(self.record.revision_counter());
+                self.audit_journal.record(
+                    AuditEventClass::LifecycleTransition,
+                    AuditEventCode::CommandCompleted,
+                    self.record.revision_counter(),
+                    self.record.current_state(),
+                    self.effective_actor_role(),
+                    self.session_state,
+                    AuditResultClass::Success,
+                    &[frame.code, result.result_state as u8],
+                );
                 clear_approval_tickets(&mut self.approval_tickets);
                 self.invalidate_authenticated_session_only();
                 let payload = encode_zeroize_payload(result);
@@ -1069,6 +1289,13 @@ impl ProtocolEngine {
 
         let payload = encode_developer_reset_payload(self.record.developer_reset());
         self.key_store = PersistentKeyStore::new(self.record.revision_counter());
+        self.audit_journal = AuditJournal::new();
+        self.record_audit_event(
+            AuditEventClass::Administrative,
+            AuditEventCode::CommandCompleted,
+            AuditResultClass::Success,
+            &[frame.code, self.record.current_state() as u8],
+        );
         clear_failure_counters(&mut self.auth_snapshot.failure_counters);
         clear_approval_tickets(&mut self.approval_tickets);
         self.invalidate_session();
@@ -1093,6 +1320,12 @@ impl ProtocolEngine {
         match self.key_store.put_persistent_key(&request) {
             Ok(result) => {
                 self.invalidate_policy_tickets();
+                self.record_audit_event(
+                    AuditEventClass::Administrative,
+                    AuditEventCode::CommandCompleted,
+                    AuditResultClass::Success,
+                    &[frame.code, result.key_id],
+                );
                 let payload = encode_key_record_result_payload(result);
                 status_response(StatusCode::Success, &payload)
             }
@@ -1159,6 +1392,12 @@ impl ProtocolEngine {
         match self.key_store.revoke_key(key_id) {
             Ok(result) => {
                 self.invalidate_policy_tickets();
+                self.record_audit_event(
+                    AuditEventClass::Administrative,
+                    AuditEventCode::CommandCompleted,
+                    AuditResultClass::Success,
+                    &[frame.code, result.key_id],
+                );
                 let payload = encode_key_record_result_payload(result);
                 status_response(StatusCode::Success, &payload)
             }
@@ -1218,6 +1457,12 @@ impl ProtocolEngine {
                     u32::from(key_id),
                 );
                 self.invalidate_policy_tickets();
+                self.record_audit_event(
+                    AuditEventClass::Administrative,
+                    AuditEventCode::CommandCompleted,
+                    AuditResultClass::Success,
+                    &[frame.code, result.key_id],
+                );
                 let payload = encode_key_destroy_payload(result);
                 status_response(StatusCode::Success, &payload)
             }
@@ -1286,6 +1531,12 @@ impl ProtocolEngine {
             Some(payload) => status_response(StatusCode::Success, &payload),
             None => status_response(StatusCode::InternalError, &[]),
         };
+        self.record_audit_event(
+            AuditEventClass::Administrative,
+            AuditEventCode::CommandCompleted,
+            AuditResultClass::Success,
+            &[frame.code, request.key_id],
+        );
         clear_secret_array(&mut key_bytes);
         clear_bytes(inner.as_mut_slice());
         response
@@ -1350,7 +1601,15 @@ impl ProtocolEngine {
             .generate_random_bytes(usize::from(request.requested_len))
         {
             Ok(bytes) => match encode_random_payload(bytes.as_slice()) {
-                Some(payload) => status_response(StatusCode::Success, &payload),
+                Some(payload) => {
+                    self.record_audit_event(
+                        AuditEventClass::Administrative,
+                        AuditEventCode::CommandCompleted,
+                        AuditResultClass::Success,
+                        &[frame.code, request.requested_len],
+                    );
+                    status_response(StatusCode::Success, &payload)
+                }
                 None => status_response(StatusCode::InternalError, &[]),
             },
             Err(StatusCode::StateError) => status_response(StatusCode::InternalError, &[]),
@@ -1358,6 +1617,7 @@ impl ProtocolEngine {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_import_wrapped_key(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
         let (_, mut inner) = match self.authorize_privileged_owned::<96>(
             AuthorityRole::KeyManager,
@@ -1450,6 +1710,12 @@ impl ProtocolEngine {
             Ok(result) => {
                 self.invalidate_policy_tickets();
                 self.crypto_state.note_wrapped_import(result.store_revision);
+                self.record_audit_event(
+                    AuditEventClass::Administrative,
+                    AuditEventCode::CommandCompleted,
+                    AuditResultClass::Success,
+                    &[frame.code, result.key_id],
+                );
                 let payload = encode_key_record_result_payload(result);
                 status_response(StatusCode::Success, &payload)
             }
@@ -1467,6 +1733,12 @@ impl ProtocolEngine {
         };
 
         self.pending_firmware_action = Some(FirmwareAction::DeveloperStoreFault(action));
+        self.record_audit_event(
+            AuditEventClass::PersistenceAnomaly,
+            AuditEventCode::PersistenceFault,
+            AuditResultClass::Degraded,
+            &[action as u8],
+        );
         status_response(StatusCode::Success, &[action as u8])
     }
 
@@ -1492,6 +1764,12 @@ impl ProtocolEngine {
                         self.policy_profile.policy_revision.saturating_add(1);
                 }
                 self.policy_profile.developer_commands_visible = self.developer_mode;
+                self.record_audit_event(
+                    AuditEventClass::Administrative,
+                    AuditEventCode::DeveloperPolicyChanged,
+                    AuditResultClass::Success,
+                    &[u8::from(self.policy_profile.dual_control_enabled)],
+                );
                 status_response(
                     StatusCode::Success,
                     &encode_policy_profile_payload(self.policy_profile),

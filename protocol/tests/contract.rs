@@ -32,3 +32,11 @@ mod policy_denial_vectors;
 mod policy_approval_vectors;
 #[path = "contract/policy_coverage_vectors.rs"]
 mod policy_coverage_vectors;
+#[path = "contract/audit_command_vectors.rs"]
+mod audit_command_vectors;
+#[path = "contract/audit_event_vectors.rs"]
+mod audit_event_vectors;
+#[path = "contract/health_status_vectors.rs"]
+mod health_status_vectors;
+#[path = "contract/audit_retention_vectors.rs"]
+mod audit_retention_vectors;

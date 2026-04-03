@@ -70,3 +70,19 @@ mod protected_action_denials;
 mod approval_staleness;
 #[path = "protocol/policy_reviewability.rs"]
 mod policy_reviewability;
+#[path = "protocol/health_status_flow.rs"]
+mod health_status_flow;
+#[path = "protocol/health_redaction.rs"]
+mod health_redaction;
+#[path = "protocol/audit_event_capture.rs"]
+mod audit_event_capture;
+#[path = "protocol/audit_retrieval_flow.rs"]
+mod audit_retrieval_flow;
+#[path = "protocol/audit_retention_flow.rs"]
+mod audit_retention_flow;
+#[path = "protocol/audit_disclosure_controls.rs"]
+mod audit_disclosure_controls;
+#[path = "protocol/audit_fail_closed.rs"]
+mod audit_fail_closed;
+#[path = "protocol/audit_surface_validation.rs"]
+mod audit_surface_validation;

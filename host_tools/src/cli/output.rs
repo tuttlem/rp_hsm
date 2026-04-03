@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::client::AuditPage;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExitStatus {
     Success = 0,
@@ -108,9 +110,48 @@ pub fn lines_output(lines: &[String]) -> CommandOutput {
     CommandOutput::Text(text)
 }
 
+#[must_use]
+pub fn audit_page_lines(device: &str, page: &AuditPage) -> Vec<String> {
+    let mut lines = vec![
+        format!("device={device}"),
+        format!("entry_count={}", page.entries.len()),
+        format!(
+            "next_sequence={}",
+            page.next_sequence
+                .map_or_else(|| "none".to_string(), |value| value.to_string())
+        ),
+        format!("truncated={}", if page.truncated { "yes" } else { "no" }),
+    ];
+    for entry in &page.entries {
+        lines.push(format!(
+            "entry sequence={} class=0x{:02x} code=0x{:02x} device_revision={} lifecycle_state={} actor_role={} session_kind={} result_class={} detail={}",
+            entry.sequence_id,
+            entry.event_class,
+            entry.event_code,
+            entry.device_revision,
+            entry.lifecycle_state,
+            entry.actor_role,
+            entry.session_kind,
+            entry.result_class,
+            hex_bytes(&entry.detail),
+        ));
+    }
+    lines
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut text, "{byte:02x}");
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CliError, CommandOutput, ExitStatus, lines_output};
+    use super::{CliError, CommandOutput, ExitStatus, audit_page_lines, lines_output};
+    use crate::client::{AuditEntryRecord, AuditPage};
 
     #[test]
     fn lines_output_joins_with_newlines() {
@@ -128,5 +169,31 @@ mod tests {
     fn usage_error_uses_usage_exit_code() {
         let err = CliError::usage("bad args");
         assert_eq!(err.exit_status, ExitStatus::Usage);
+    }
+
+    #[test]
+    fn audit_page_output_is_bounded_and_human_readable() {
+        let lines = audit_page_lines(
+            "/dev/test",
+            &AuditPage {
+                entries: vec![AuditEntryRecord {
+                    sequence_id: 7,
+                    event_class: 0x05,
+                    event_code: 0x07,
+                    device_revision: 11,
+                    lifecycle_state: 0x03,
+                    actor_role: 0x03,
+                    session_kind: 0x03,
+                    result_class: 0x01,
+                    detail: vec![0x0c, 0x02],
+                }],
+                next_sequence: Some(8),
+                truncated: true,
+            },
+        );
+        assert_eq!(lines[0], "device=/dev/test");
+        assert_eq!(lines[1], "entry_count=1");
+        assert!(lines[3].contains("truncated=yes"));
+        assert!(lines[4].contains("detail=0c02"));
     }
 }

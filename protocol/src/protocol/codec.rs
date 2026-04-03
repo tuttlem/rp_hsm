@@ -5,14 +5,14 @@ use super::frame::{
     RESERVED_FLAG_MASK,
 };
 use super::state::{
-    ApprovalTicket, AuthorityRole, CryptoCapabilities, DenialClass,
-    DeveloperResetOutcome, DeviceState, ExportPolicy, ImportWrappedKeyRequest, KeyAlgorithm,
-    KeyDestroyResult, KeyListEntry, KeyMaterialEnvelope, KeyMetadataView, KeyOrigin,
-    KeyRecordResult, KeyStoreStatus, LifecycleStatus, LockResult, MAX_CRYPTO_MESSAGE_LEN,
-    MAX_RANDOM_OUTPUT_LEN, MAX_SIGNATURE_LEN, MAX_WRAPPED_CIPHERTEXT_LEN, MAX_WRAPPED_TAG_LEN,
-    P256_PUBLIC_KEY_LEN, PolicyProfile, PutPersistentKeyRequest, RandomRequest, RecoveryResult,
-    SessionState, SessionStatus, SignRequest, StateRevision, TransitionResult, VerifyRequest,
-    ZeroizeOutcome,
+    ApprovalTicket, AuditEvent, AuditRetrievalCursor, AuthorityRole, CryptoCapabilities,
+    DenialClass, DeveloperResetOutcome, DeviceState, ExportPolicy, HealthStatusView,
+    ImportWrappedKeyRequest, KeyAlgorithm, KeyDestroyResult, KeyListEntry, KeyMaterialEnvelope,
+    KeyMetadataView, KeyOrigin, KeyRecordResult, KeyStoreStatus, LifecycleStatus, LockResult,
+    MAX_CRYPTO_MESSAGE_LEN, MAX_RANDOM_OUTPUT_LEN, MAX_SIGNATURE_LEN, MAX_WRAPPED_CIPHERTEXT_LEN,
+    MAX_WRAPPED_TAG_LEN, P256_PUBLIC_KEY_LEN, PolicyProfile, PutPersistentKeyRequest,
+    RandomRequest, RecoveryResult, SessionState, SessionStatus, SignRequest, StateRevision,
+    TransitionResult, VerifyRequest, ZeroizeOutcome,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -425,6 +425,54 @@ pub fn encode_crypto_capabilities_payload(
 }
 
 #[must_use]
+pub fn encode_health_status_payload(status: HealthStatusView) -> [u8; 13] {
+    let policy_revision = status.policy_revision.to_le_bytes();
+    let retained = status.audit_events_retained.to_le_bytes();
+    [
+        status.device_state as u8,
+        status.key_store_state as u8,
+        status.session_state as u8,
+        policy_revision[0],
+        policy_revision[1],
+        policy_revision[2],
+        policy_revision[3],
+        status.audit_store_state as u8,
+        retained[0],
+        retained[1],
+        u8::from(status.audit_overflow_detected),
+        u8::from(status.rollback_detected),
+        u8::from(status.corruption_detected),
+    ]
+}
+
+#[must_use]
+pub fn encode_audit_page_payload(
+    events: &[AuditEvent],
+    cursor: AuditRetrievalCursor,
+) -> Option<Vec<u8, MAX_PAYLOAD_LEN>> {
+    let mut payload = Vec::new();
+    payload.push(u8::try_from(events.len()).ok()?).ok()?;
+    payload.push(u8::from(cursor.next_sequence.is_some())).ok()?;
+    payload
+        .extend_from_slice(&cursor.next_sequence.unwrap_or(0).to_le_bytes())
+        .ok()?;
+    payload.push(u8::from(cursor.truncated)).ok()?;
+    for event in events {
+        payload.extend_from_slice(&event.sequence_id.to_le_bytes()).ok()?;
+        payload.push(event.event_class as u8).ok()?;
+        payload.push(event.event_code as u8).ok()?;
+        payload.extend_from_slice(&event.device_revision.to_le_bytes()).ok()?;
+        payload.push(event.lifecycle_state as u8).ok()?;
+        payload.push(event.actor_role as u8).ok()?;
+        payload.push(event.session_kind as u8).ok()?;
+        payload.push(event.result_class as u8).ok()?;
+        payload.push(event.detail_len).ok()?;
+        payload.extend_from_slice(event.detail.as_slice()).ok()?;
+    }
+    Some(payload)
+}
+
+#[must_use]
 pub fn encode_signature_payload(signature: &[u8]) -> Option<Vec<u8, MAX_PAYLOAD_LEN>> {
     let mut payload = Vec::new();
     payload
@@ -539,6 +587,21 @@ pub fn decode_random_request(payload: &[u8]) -> Result<RandomRequest, StatusCode
         return Err(StatusCode::ValidationError);
     }
     Ok(RandomRequest { requested_len })
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the audit-page request is malformed.
+pub fn decode_audit_page_request(payload: &[u8]) -> Result<(u32, u8), StatusCode> {
+    if payload.len() != 5 {
+        return Err(StatusCode::ValidationError);
+    }
+    let start_sequence = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    let max_events = payload[4];
+    if max_events == 0 {
+        return Err(StatusCode::ValidationError);
+    }
+    Ok((start_sequence, max_events))
 }
 
 /// # Errors

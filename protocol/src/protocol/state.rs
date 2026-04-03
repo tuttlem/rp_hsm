@@ -41,6 +41,9 @@ pub const PROTECTED_ACTION_DESTROY_KEY: u16 = 0x0002;
 pub const PROTECTED_ACTION_RECOVERY_TRANSITION: u16 = 0x0004;
 pub const MAX_APPROVAL_TICKETS: usize = 3;
 pub const APPROVAL_TICKET_EXPIRY_TICKS: u16 = 8;
+pub const MAX_AUDIT_DETAIL_LEN: usize = 12;
+pub const MAX_AUDIT_EVENTS: usize = 32;
+pub const MAX_AUDIT_PAGE_EVENTS: usize = 4;
 
 const FINALIZE_MARKER: u8 = 0xa5;
 const REACTIVATE_MARKER: u8 = 0xa6;
@@ -198,6 +201,105 @@ pub struct PolicyDecision {
     pub decision: bool,
     pub denial_class: DenialClass,
     pub approval_ticket_id: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AuditEventClass {
+    Administrative = 0x01,
+    SecurityDenial = 0x02,
+    LifecycleTransition = 0x03,
+    PersistenceAnomaly = 0x04,
+    ObservabilityAccess = 0x05,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AuditResultClass {
+    Success = 0x01,
+    Denied = 0x02,
+    FailedClosed = 0x03,
+    Degraded = 0x04,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AuditEventCode {
+    CommandCompleted = 0x01,
+    CommandDenied = 0x02,
+    AuthenticationFailed = 0x03,
+    SessionInvalidated = 0x04,
+    HealthStatusViewed = 0x05,
+    HealthStatusDenied = 0x06,
+    AuditPageViewed = 0x07,
+    AuditPageDenied = 0x08,
+    RetentionOverflow = 0x09,
+    PersistenceFault = 0x0a,
+    DeveloperPolicyChanged = 0x0b,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AuditStoreState {
+    Empty = 0x01,
+    Ready = 0x02,
+    Full = 0x03,
+    Degraded = 0x04,
+    Locked = 0x05,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuditEvent {
+    pub sequence_id: u32,
+    pub event_class: AuditEventClass,
+    pub event_code: AuditEventCode,
+    pub device_revision: u32,
+    pub lifecycle_state: DeviceState,
+    pub actor_role: AuthorityRole,
+    pub session_kind: SessionState,
+    pub result_class: AuditResultClass,
+    pub detail_len: u8,
+    pub detail: Vec<u8, MAX_AUDIT_DETAIL_LEN>,
+    pub integrity_tag: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuditRetrievalCursor {
+    pub start_sequence: u32,
+    pub max_events: u8,
+    pub next_sequence: Option<u32>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HealthStatusView {
+    pub device_state: DeviceState,
+    pub key_store_state: KeyStoreState,
+    pub session_state: SessionState,
+    pub policy_revision: u32,
+    pub audit_store_state: AuditStoreState,
+    pub audit_events_retained: u16,
+    pub audit_overflow_detected: bool,
+    pub rollback_detected: bool,
+    pub corruption_detected: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuditJournal {
+    pub events: Vec<AuditEvent, MAX_AUDIT_EVENTS>,
+    pub next_sequence_id: u32,
+    pub overflow_count: u32,
+    pub corruption_detected: bool,
+    pub retrieval_locked: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuditStoreSnapshot {
+    pub events: Vec<AuditEvent, MAX_AUDIT_EVENTS>,
+    pub next_sequence_id: u32,
+    pub overflow_count: u32,
+    pub corruption_detected: bool,
+    pub retrieval_locked: bool,
 }
 
 impl PolicyDecision {
@@ -1029,6 +1131,234 @@ pub struct PersistentKeyStore {
 pub struct KeyStoreSnapshot {
     pub journal: Vec<KeyStoreRecord, MAX_KEY_JOURNAL_RECORDS>,
     pub anchor: FreshnessAnchor,
+}
+
+impl AuditEvent {
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        sequence_id: u32,
+        event_class: AuditEventClass,
+        event_code: AuditEventCode,
+        device_revision: u32,
+        lifecycle_state: DeviceState,
+        actor_role: AuthorityRole,
+        session_kind: SessionState,
+        result_class: AuditResultClass,
+        detail: &[u8],
+    ) -> Self {
+        let mut bounded_detail = Vec::<u8, MAX_AUDIT_DETAIL_LEN>::new();
+        let copy_len = detail.len().min(MAX_AUDIT_DETAIL_LEN);
+        let _ = bounded_detail.extend_from_slice(&detail[..copy_len]);
+        let detail_len = u8::try_from(bounded_detail.len()).unwrap_or(0);
+        let mut event = Self {
+            sequence_id,
+            event_class,
+            event_code,
+            device_revision,
+            lifecycle_state,
+            actor_role,
+            session_kind,
+            result_class,
+            detail_len,
+            detail: bounded_detail,
+            integrity_tag: 0,
+        };
+        event.refresh_integrity();
+        event
+    }
+
+    #[must_use]
+    pub fn verify_integrity(&self) -> bool {
+        self.integrity_tag == self.compute_integrity_tag()
+    }
+
+    pub fn refresh_integrity(&mut self) {
+        self.integrity_tag = self.compute_integrity_tag();
+    }
+
+    fn compute_integrity_tag(&self) -> u32 {
+        let mut tag = self.sequence_id.rotate_left(5)
+            ^ (self.event_class as u32)
+            ^ ((self.event_code as u32) << 8)
+            ^ self.device_revision.rotate_left(11)
+            ^ ((self.lifecycle_state as u32) << 16)
+            ^ ((self.actor_role as u32) << 20)
+            ^ ((self.session_kind as u32) << 24)
+            ^ ((self.result_class as u32) << 28);
+        for &byte in &self.detail {
+            tag = tag.rotate_left(3) ^ u32::from(byte);
+        }
+        tag ^ 0x0a7d_17e1
+    }
+}
+
+impl Default for AuditJournal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AuditJournal {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            events: Vec::new(),
+            next_sequence_id: 1,
+            overflow_count: 0,
+            corruption_detected: false,
+            retrieval_locked: false,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.events.clear();
+        self.next_sequence_id = 1;
+        self.overflow_count = 0;
+        self.corruption_detected = false;
+        self.retrieval_locked = false;
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> AuditStoreSnapshot {
+        AuditStoreSnapshot {
+            events: self.events.clone(),
+            next_sequence_id: self.next_sequence_id,
+            overflow_count: self.overflow_count,
+            corruption_detected: self.corruption_detected,
+            retrieval_locked: self.retrieval_locked,
+        }
+    }
+
+    pub fn restore_snapshot(&mut self, snapshot: AuditStoreSnapshot) {
+        self.events = snapshot.events;
+        self.next_sequence_id = snapshot.next_sequence_id;
+        self.overflow_count = snapshot.overflow_count;
+        self.corruption_detected = snapshot.corruption_detected;
+        self.retrieval_locked = snapshot.retrieval_locked;
+    }
+
+    pub fn reconcile_after_boot(&mut self) {
+        let mut previous = None;
+        self.corruption_detected = false;
+        for event in &self.events {
+            if !event.verify_integrity() {
+                self.corruption_detected = true;
+                self.retrieval_locked = true;
+                return;
+            }
+            if let Some(prev) = previous
+                && event.sequence_id <= prev
+            {
+                self.corruption_detected = true;
+                self.retrieval_locked = true;
+                return;
+            }
+            previous = Some(event.sequence_id);
+        }
+        self.retrieval_locked = self.corruption_detected;
+        if let Some(last) = self.events.last() {
+            self.next_sequence_id = last.sequence_id.saturating_add(1);
+        } else {
+            self.next_sequence_id = 1;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record(
+        &mut self,
+        event_class: AuditEventClass,
+        event_code: AuditEventCode,
+        device_revision: u32,
+        lifecycle_state: DeviceState,
+        actor_role: AuthorityRole,
+        session_kind: SessionState,
+        result_class: AuditResultClass,
+        detail: &[u8],
+    ) {
+        let event = AuditEvent::new(
+            self.next_sequence_id,
+            event_class,
+            event_code,
+            device_revision,
+            lifecycle_state,
+            actor_role,
+            session_kind,
+            result_class,
+            detail,
+        );
+        self.next_sequence_id = self.next_sequence_id.saturating_add(1);
+        if self.events.len() == MAX_AUDIT_EVENTS {
+            let _ = self.events.remove(0);
+            self.overflow_count = self.overflow_count.saturating_add(1);
+        }
+        let _ = self.events.push(event);
+    }
+
+    #[must_use]
+    pub fn store_state(&self) -> AuditStoreState {
+        if self.retrieval_locked {
+            AuditStoreState::Locked
+        } else if self.corruption_detected {
+            AuditStoreState::Degraded
+        } else if self.events.is_empty() {
+            AuditStoreState::Empty
+        } else if self.events.len() == MAX_AUDIT_EVENTS {
+            AuditStoreState::Full
+        } else {
+            AuditStoreState::Ready
+        }
+    }
+
+    #[must_use]
+    pub fn events_retained(&self) -> u16 {
+        u16::try_from(self.events.len()).unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn overflow_detected(&self) -> bool {
+        self.overflow_count != 0
+    }
+
+    /// # Errors
+    ///
+    /// Returns `StatusCode::StateError` when retrieval is locked because the
+    /// retained audit history can no longer be trusted.
+    pub fn page(
+        &self,
+        start_sequence: u32,
+        max_events: u8,
+    ) -> Result<(Vec<AuditEvent, MAX_AUDIT_PAGE_EVENTS>, AuditRetrievalCursor), StatusCode> {
+        if self.retrieval_locked {
+            return Err(StatusCode::StateError);
+        }
+        let bounded_max = usize::from(max_events.clamp(1, u8::try_from(MAX_AUDIT_PAGE_EVENTS).unwrap_or(1)));
+        let mut page = Vec::<AuditEvent, MAX_AUDIT_PAGE_EVENTS>::new();
+        let mut next_sequence = None;
+        let mut started = false;
+        for event in &self.events {
+            if !started {
+                if start_sequence == 0 || event.sequence_id >= start_sequence {
+                    started = true;
+                } else {
+                    continue;
+                }
+            }
+            if page.len() < bounded_max {
+                let _ = page.push(event.clone());
+            } else {
+                next_sequence = Some(event.sequence_id);
+                break;
+            }
+        }
+        let cursor = AuditRetrievalCursor {
+            start_sequence,
+            max_events: u8::try_from(bounded_max).unwrap_or(1),
+            next_sequence,
+            truncated: next_sequence.is_some(),
+        };
+        Ok((page, cursor))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -27,6 +27,8 @@ pub enum CommandId {
     InvalidateSession = 0x09,
     GetCryptoCapabilities = 0x0a,
     VerifyDetached = 0x0b,
+    GetHealthStatus = 0x0c,
+    GetAuditPage = 0x0d,
     BeginProvisioning = 0x80,
     FinalizeProvisioning = 0x81,
     LockDevice = 0x82,
@@ -68,6 +70,8 @@ impl CommandId {
             0x09 => Some(Self::InvalidateSession),
             0x0a => Some(Self::GetCryptoCapabilities),
             0x0b => Some(Self::VerifyDetached),
+            0x0c => Some(Self::GetHealthStatus),
+            0x0d => Some(Self::GetAuditPage),
             0x80 => Some(Self::BeginProvisioning),
             0x81 => Some(Self::FinalizeProvisioning),
             0x82 => Some(Self::LockDevice),
@@ -307,6 +311,36 @@ pub const VERIFY_DETACHED: CommandDefinition = CommandDefinition {
     max_payload_len: 231,
     allowed_device_states: CATALOG_STATES,
     required_role: AuthorityRole::Public,
+    replay_policy: ReplayPolicy::Repeatable,
+    idempotency_policy: IdempotencyPolicy::Idempotent,
+    enabled: true,
+    developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
+};
+
+pub const GET_HEALTH_STATUS: CommandDefinition = CommandDefinition {
+    id: CommandId::GetHealthStatus,
+    family: CommandFamily::Status,
+    min_payload_len: 0,
+    max_payload_len: 0,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Public,
+    replay_policy: ReplayPolicy::Repeatable,
+    idempotency_policy: IdempotencyPolicy::Idempotent,
+    enabled: true,
+    developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
+};
+
+pub const GET_AUDIT_PAGE: CommandDefinition = CommandDefinition {
+    id: CommandId::GetAuditPage,
+    family: CommandFamily::Status,
+    min_payload_len: AUTH_HEADER_LEN + 5,
+    max_payload_len: AUTH_HEADER_LEN + 5,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Administrator,
     replay_policy: ReplayPolicy::Repeatable,
     idempotency_policy: IdempotencyPolicy::Idempotent,
     enabled: true,
@@ -686,6 +720,7 @@ pub const PUBLIC_COMMANDS: &[CommandDefinition] = &[
     GET_SESSION_STATUS,
     GET_CRYPTO_CAPABILITIES,
     VERIFY_DETACHED,
+    GET_HEALTH_STATUS,
 ];
 
 pub fn lookup_command(id: u8) -> Option<CommandDefinition> {
@@ -706,6 +741,8 @@ pub fn definition_for(id: CommandId) -> CommandDefinition {
         CommandId::InvalidateSession => INVALIDATE_SESSION,
         CommandId::GetCryptoCapabilities => GET_CRYPTO_CAPABILITIES,
         CommandId::VerifyDetached => VERIFY_DETACHED,
+        CommandId::GetHealthStatus => GET_HEALTH_STATUS,
+        CommandId::GetAuditPage => GET_AUDIT_PAGE,
         CommandId::BeginProvisioning => BEGIN_PROVISIONING,
         CommandId::FinalizeProvisioning => FINALIZE_PROVISIONING,
         CommandId::LockDevice => LOCK_DEVICE,
@@ -743,6 +780,7 @@ fn public_and(extra: &'static [CommandDefinition]) -> &'static [CommandDefinitio
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn get_visible_catalog(
     session_state: SessionState,
     include_restricted: bool,
@@ -765,6 +803,7 @@ pub fn get_visible_catalog(
             GET_SESSION_STATUS,
             GET_CRYPTO_CAPABILITIES,
             VERIFY_DETACHED,
+            GET_HEALTH_STATUS,
             INVALIDATE_SESSION,
             BEGIN_PROVISIONING,
             FINALIZE_PROVISIONING,
@@ -780,7 +819,9 @@ pub fn get_visible_catalog(
             GET_SESSION_STATUS,
             GET_CRYPTO_CAPABILITIES,
             VERIFY_DETACHED,
+            GET_HEALTH_STATUS,
             INVALIDATE_SESSION,
+            GET_AUDIT_PAGE,
             LOCK_DEVICE,
             UNLOCK_DEVICE,
             EXECUTE_ZEROIZE,
@@ -797,7 +838,9 @@ pub fn get_visible_catalog(
             GET_SESSION_STATUS,
             GET_CRYPTO_CAPABILITIES,
             VERIFY_DETACHED,
+            GET_HEALTH_STATUS,
             INVALIDATE_SESSION,
+            GET_AUDIT_PAGE,
             ENTER_RECOVERY,
             RECOVER_TO_PROVISIONED,
             REACTIVATE_RECOVERED_PROVISIONING,
@@ -815,6 +858,8 @@ pub fn get_visible_catalog(
                     GET_SESSION_STATUS,
                     GET_CRYPTO_CAPABILITIES,
                     VERIFY_DETACHED,
+                    GET_HEALTH_STATUS,
+                    GET_AUDIT_PAGE,
                     DEVELOPER_RESET_LIFECYCLE,
                     DEVELOPER_STORE_FAULT,
                     DEVELOPER_REBOOT,
@@ -834,6 +879,7 @@ pub fn get_visible_catalog(
             GET_SESSION_STATUS,
             GET_CRYPTO_CAPABILITIES,
             VERIFY_DETACHED,
+            GET_HEALTH_STATUS,
             INVALIDATE_SESSION,
             PUT_PERSISTENT_KEY,
             LIST_PERSISTENT_KEYS,

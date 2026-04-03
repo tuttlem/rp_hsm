@@ -132,6 +132,7 @@ fn main() -> ! {
         Ok(persistence::LoadOutcome::Restored(state)) => {
             protocol_engine.restore_provisioning_snapshot(state.provisioning);
             protocol_engine.restore_key_store(state.key_store);
+            protocol_engine.restore_audit_snapshot(state.audit);
             protocol_engine.restore_auth_snapshot(state.auth);
             protocol_engine.restore_crypto_persistent_state(state.crypto);
             protocol_engine.restore_policy_profile(state.policy);
@@ -144,6 +145,7 @@ fn main() -> ! {
             let fallback = persistence::corrupted_recovery_state();
             protocol_engine.restore_provisioning_snapshot(fallback.provisioning);
             protocol_engine.restore_key_store(fallback.key_store);
+            protocol_engine.restore_audit_snapshot(fallback.audit);
             protocol_engine.restore_auth_snapshot(fallback.auth);
             protocol_engine.restore_crypto_persistent_state(fallback.crypto);
             protocol_engine.restore_policy_profile(fallback.policy);
@@ -160,6 +162,7 @@ fn main() -> ! {
     let _ = persistence::FlashStateStore::save(&persistence::PersistedState {
         provisioning: protocol_engine.provisioning_snapshot(),
         key_store: protocol_engine.key_store().snapshot(),
+        audit: protocol_engine.audit_snapshot(),
         auth: protocol_engine.auth_snapshot().clone(),
         crypto: protocol_engine.crypto_persistent_state(),
         policy: protocol_engine.policy_profile(),
@@ -222,6 +225,7 @@ fn main() -> ! {
 
                 let prior_provisioning = protocol_engine.provisioning_snapshot();
                 let prior_key_store = protocol_engine.key_store().snapshot();
+                let prior_audit = protocol_engine.audit_snapshot();
                 let prior_auth = protocol_engine.auth_snapshot().clone();
                 let prior_crypto = protocol_engine.crypto_persistent_state();
                 let prior_policy = protocol_engine.policy_profile();
@@ -232,6 +236,7 @@ fn main() -> ! {
                 if response.code == StatusCode::Success.as_u8() {
                     let current_provisioning = protocol_engine.provisioning_snapshot();
                     let current_key_store = protocol_engine.key_store().snapshot();
+                    let current_audit = protocol_engine.audit_snapshot();
                     let current_auth = protocol_engine.auth_snapshot().clone();
                     let current_crypto = protocol_engine.crypto_persistent_state();
                     let current_policy = protocol_engine.policy_profile();
@@ -239,6 +244,7 @@ fn main() -> ! {
                     let current_next_approval_ticket_id = protocol_engine.next_approval_ticket_id();
                     if current_provisioning != prior_provisioning
                         || current_key_store != prior_key_store
+                        || current_audit != prior_audit
                         || current_auth != prior_auth
                         || current_crypto != prior_crypto
                         || current_policy != prior_policy
@@ -248,6 +254,7 @@ fn main() -> ! {
                         let persist_result = persistence::FlashStateStore::save(&persistence::PersistedState {
                             provisioning: current_provisioning.clone(),
                             key_store: current_key_store.clone(),
+                            audit: current_audit.clone(),
                             auth: current_auth.clone(),
                             crypto: current_crypto,
                             policy: current_policy,
@@ -257,6 +264,7 @@ fn main() -> ! {
                         if persist_result.is_err() {
                             protocol_engine.restore_provisioning_snapshot(prior_provisioning);
                             protocol_engine.restore_key_store(prior_key_store);
+                            protocol_engine.restore_audit_snapshot(prior_audit);
                             protocol_engine.restore_auth_snapshot(prior_auth);
                             protocol_engine.restore_crypto_persistent_state(prior_crypto);
                             protocol_engine.restore_policy_profile(prior_policy);

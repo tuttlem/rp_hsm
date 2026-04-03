@@ -3,12 +3,14 @@ use core::slice;
 use critical_section::with;
 use heapless::Vec;
 use protocol::protocol::{
-    ApprovalTargetBinding, ApprovalTicket, ApprovalTicketState, AuthSnapshot, AuthorityRole,
+    ApprovalTargetBinding, ApprovalTicket, ApprovalTicketState, AuditEvent, AuditEventClass,
+    AuditEventCode, AuditResultClass, AuditStoreSnapshot, AuthSnapshot, AuthorityRole,
     CredentialKind, CredentialRecord, CryptoPersistentState, DeveloperStoreFaultAction,
     DeviceState, ExportPolicy, KeyAlgorithm, KeyLifecycleState, KeyMetadata, KeyOrigin,
-    KeyStoreRecord, KeyStoreSnapshot, MAX_APPROVAL_TICKETS, MAX_KEY_JOURNAL_RECORDS,
-    MAX_KEY_MATERIAL_LEN, POLICY_PROFILE_VERSION, PolicyProfile, ProtectedActionClass,
-    ProvisioningSnapshot, RecoveryPolicy, TransitionIntent, TransitionType,
+    KeyStoreRecord, KeyStoreSnapshot, MAX_APPROVAL_TICKETS, MAX_AUDIT_DETAIL_LEN,
+    MAX_AUDIT_EVENTS, MAX_KEY_JOURNAL_RECORDS, MAX_KEY_MATERIAL_LEN, POLICY_PROFILE_VERSION,
+    PolicyProfile, ProtectedActionClass, ProvisioningSnapshot, RecoveryPolicy, SessionState,
+    TransitionIntent, TransitionType,
 };
 use protocol::protocol::state::{
     AuthorizationMode, FreshnessAnchor, KeyMaterialEnvelope, LifecycleState, MaterialEncoding,
@@ -20,7 +22,7 @@ const FLASH_XIP_BASE: usize = 0x1000_0000;
 const SLOT_SIZE: usize = 4096;
 const PAGE_SIZE: usize = 256;
 const MAGIC: [u8; 4] = *b"HSM3";
-const FORMAT_VERSION: u8 = 1;
+const FORMAT_VERSION: u8 = 2;
 const HEADER_SIZE: usize = 20;
 const PAYLOAD_CAPACITY: usize = SLOT_SIZE - HEADER_SIZE;
 
@@ -32,6 +34,7 @@ unsafe extern "C" {
 pub struct PersistedState {
     pub provisioning: ProvisioningSnapshot,
     pub key_store: KeyStoreSnapshot,
+    pub audit: AuditStoreSnapshot,
     pub auth: AuthSnapshot,
     pub crypto: CryptoPersistentState,
     pub policy: PolicyProfile,
@@ -132,6 +135,23 @@ impl FlashStateStore {
                 state.key_store.anchor.refresh_integrity();
                 write_slot(target_slot, active.generation.saturating_add(1), &state)
             }
+            DeveloperStoreFaultAction::CorruptPersistedAudit => {
+                let mut state = active.state.clone();
+                if let Some(event) = state.audit.events.first_mut() {
+                    event.integrity_tag ^= 0xffff_ffff;
+                } else {
+                    state.audit.corruption_detected = true;
+                    state.audit.retrieval_locked = true;
+                }
+                write_slot(target_slot, active.generation.saturating_add(1), &state)
+            }
+            DeveloperStoreFaultAction::RollbackPersistedAudit => {
+                let mut state = active.state.clone();
+                state.audit.next_sequence_id = 1;
+                state.audit.retrieval_locked = true;
+                state.audit.corruption_detected = true;
+                write_slot(target_slot, active.generation.saturating_add(1), &state)
+            }
         }
     }
 
@@ -197,6 +217,13 @@ pub fn corrupted_recovery_state() -> PersistedState {
         key_store: KeyStoreSnapshot {
             journal,
             anchor,
+        },
+        audit: AuditStoreSnapshot {
+            events: Vec::new(),
+            next_sequence_id: 1,
+            overflow_count: 0,
+            corruption_detected: true,
+            retrieval_locked: true,
         },
         auth: AuthSnapshot::default(),
         crypto: CryptoPersistentState::default(),
@@ -327,6 +354,7 @@ fn encode_state(
 ) -> Result<(), PersistenceError> {
     encode_provisioning(&state.provisioning, out)?;
     encode_key_store(&state.key_store, out)?;
+    encode_audit_store(&state.audit, out)?;
     encode_auth_snapshot(&state.auth, out)?;
     encode_crypto_state(&state.crypto, out)?;
     encode_policy_state(&state.policy, &state.approval_tickets, state.next_approval_ticket_id, out)
@@ -427,6 +455,33 @@ fn encode_auth_snapshot(
     push_u32(out, snapshot.next_session_id)
 }
 
+fn encode_audit_store(
+    snapshot: &AuditStoreSnapshot,
+    out: &mut Vec<u8, PAYLOAD_CAPACITY>,
+) -> Result<(), PersistenceError> {
+    push_u32(out, snapshot.next_sequence_id)?;
+    push_u32(out, snapshot.overflow_count)?;
+    push_u8(out, u8::from(snapshot.corruption_detected))?;
+    push_u8(out, u8::from(snapshot.retrieval_locked))?;
+    push_u8(
+        out,
+        u8::try_from(snapshot.events.len()).map_err(|_| PersistenceError::EncodeOverflow)?,
+    )?;
+    for event in &snapshot.events {
+        push_u32(out, event.sequence_id)?;
+        push_u8(out, event.event_class as u8)?;
+        push_u8(out, event.event_code as u8)?;
+        push_u32(out, event.device_revision)?;
+        push_u8(out, event.lifecycle_state as u8)?;
+        push_u8(out, event.actor_role as u8)?;
+        push_u8(out, event.session_kind as u8)?;
+        push_u8(out, event.result_class as u8)?;
+        push_vec(out, &event.detail)?;
+        push_u32(out, event.integrity_tag)?;
+    }
+    Ok(())
+}
+
 fn encode_crypto_state(
     snapshot: &CryptoPersistentState,
     out: &mut Vec<u8, PAYLOAD_CAPACITY>,
@@ -506,6 +561,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, PersistenceError> {
     let mut cursor = Cursor::new(bytes);
     let provisioning = decode_provisioning(&mut cursor)?;
     let key_store = decode_key_store(&mut cursor)?;
+    let audit = decode_audit_store(&mut cursor)?;
     let auth = decode_auth_snapshot(&mut cursor)?;
     let crypto = decode_crypto_state(&mut cursor)?;
     let (policy, approval_tickets, next_approval_ticket_id) = decode_policy_state(&mut cursor)?;
@@ -515,6 +571,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, PersistenceError> {
     Ok(PersistedState {
         provisioning,
         key_store,
+        audit,
         auth,
         crypto,
         policy,
@@ -677,6 +734,50 @@ fn decode_auth_snapshot(cursor: &mut Cursor<'_>) -> Result<AuthSnapshot, Persist
     })
 }
 
+fn decode_audit_store(cursor: &mut Cursor<'_>) -> Result<AuditStoreSnapshot, PersistenceError> {
+    let next_sequence_id = cursor.read_u32()?;
+    let overflow_count = cursor.read_u32()?;
+    let corruption_detected = cursor.read_u8()? != 0;
+    let retrieval_locked = cursor.read_u8()? != 0;
+    let event_len = usize::from(cursor.read_u8()?);
+    let mut events = Vec::<AuditEvent, MAX_AUDIT_EVENTS>::new();
+    for _ in 0..event_len {
+        let sequence_id = cursor.read_u32()?;
+        let event_class = decode_audit_event_class(cursor.read_u8()?)?;
+        let event_code = decode_audit_event_code(cursor.read_u8()?)?;
+        let device_revision = cursor.read_u32()?;
+        let lifecycle_state = decode_device_state(cursor.read_u8()?)?;
+        let actor_role = decode_authority_role(cursor.read_u8()?)?;
+        let session_kind = decode_session_state(cursor.read_u8()?)?;
+        let result_class = decode_audit_result_class(cursor.read_u8()?)?;
+        let detail = cursor.read_vec::<MAX_AUDIT_DETAIL_LEN>()?;
+        let detail_len = u8::try_from(detail.len()).map_err(|_| PersistenceError::DecodeFailure)?;
+        let integrity_tag = cursor.read_u32()?;
+        events
+            .push(AuditEvent {
+                sequence_id,
+                event_class,
+                event_code,
+                device_revision,
+                lifecycle_state,
+                actor_role,
+                session_kind,
+                result_class,
+                detail_len,
+                detail,
+                integrity_tag,
+            })
+            .map_err(|_| PersistenceError::DecodeFailure)?;
+    }
+    Ok(AuditStoreSnapshot {
+        events,
+        next_sequence_id,
+        overflow_count,
+        corruption_detected,
+        retrieval_locked,
+    })
+}
+
 fn decode_crypto_state(cursor: &mut Cursor<'_>) -> Result<CryptoPersistentState, PersistenceError> {
     Ok(CryptoPersistentState {
         policy_version: cursor.read_u8()?,
@@ -741,6 +842,56 @@ fn decode_authority_role(byte: u8) -> Result<AuthorityRole, PersistenceError> {
         0x04 => Ok(AuthorityRole::Recovery),
         0x05 => Ok(AuthorityRole::Developer),
         0x06 => Ok(AuthorityRole::KeyManager),
+        _ => Err(PersistenceError::DecodeFailure),
+    }
+}
+
+fn decode_session_state(byte: u8) -> Result<SessionState, PersistenceError> {
+    match byte {
+        0x01 => Ok(SessionState::Unauthenticated),
+        0x02 => Ok(SessionState::Bootstrap),
+        0x03 => Ok(SessionState::Administrator),
+        0x04 => Ok(SessionState::Recovery),
+        0x05 => Ok(SessionState::Developer),
+        0x06 => Ok(SessionState::KeyManager),
+        _ => Err(PersistenceError::DecodeFailure),
+    }
+}
+
+fn decode_audit_event_class(byte: u8) -> Result<AuditEventClass, PersistenceError> {
+    match byte {
+        0x01 => Ok(AuditEventClass::Administrative),
+        0x02 => Ok(AuditEventClass::SecurityDenial),
+        0x03 => Ok(AuditEventClass::LifecycleTransition),
+        0x04 => Ok(AuditEventClass::PersistenceAnomaly),
+        0x05 => Ok(AuditEventClass::ObservabilityAccess),
+        _ => Err(PersistenceError::DecodeFailure),
+    }
+}
+
+fn decode_audit_event_code(byte: u8) -> Result<AuditEventCode, PersistenceError> {
+    match byte {
+        0x01 => Ok(AuditEventCode::CommandCompleted),
+        0x02 => Ok(AuditEventCode::CommandDenied),
+        0x03 => Ok(AuditEventCode::AuthenticationFailed),
+        0x04 => Ok(AuditEventCode::SessionInvalidated),
+        0x05 => Ok(AuditEventCode::HealthStatusViewed),
+        0x06 => Ok(AuditEventCode::HealthStatusDenied),
+        0x07 => Ok(AuditEventCode::AuditPageViewed),
+        0x08 => Ok(AuditEventCode::AuditPageDenied),
+        0x09 => Ok(AuditEventCode::RetentionOverflow),
+        0x0a => Ok(AuditEventCode::PersistenceFault),
+        0x0b => Ok(AuditEventCode::DeveloperPolicyChanged),
+        _ => Err(PersistenceError::DecodeFailure),
+    }
+}
+
+fn decode_audit_result_class(byte: u8) -> Result<AuditResultClass, PersistenceError> {
+    match byte {
+        0x01 => Ok(AuditResultClass::Success),
+        0x02 => Ok(AuditResultClass::Denied),
+        0x03 => Ok(AuditResultClass::FailedClosed),
+        0x04 => Ok(AuditResultClass::Degraded),
         _ => Err(PersistenceError::DecodeFailure),
     }
 }
