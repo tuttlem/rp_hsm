@@ -286,6 +286,7 @@ pub fn execute(parsed: ParsedArgs) -> Result<CommandOutput, CliError> {
         CommandSpec::GetAuditPage {
             start_sequence,
             max_events,
+            one_line,
             auth,
         } => {
             let proof = load_proof(&auth)?;
@@ -293,7 +294,7 @@ pub fn execute(parsed: ParsedArgs) -> Result<CommandOutput, CliError> {
             let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
             let page = SerialBackend::new(crate::client::ClientConfig::new(selected.clone(), parsed.global.baud))
                 .get_audit_page(auth.role, &proof, start_sequence, max_events)?;
-            Ok(lines_output(&audit_page_lines(&selected, &page)))
+            Ok(lines_output(&audit_page_lines(&selected, &page, one_line)))
         }
         CommandSpec::Sign { key_id, auth } => {
             let proof = load_proof(&auth)?;

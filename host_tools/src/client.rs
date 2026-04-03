@@ -9,7 +9,7 @@ use protocol::protocol::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::cli::output::CliError;
+use crate::cli::output::{CliError, TransportCondition};
 
 const DEFAULT_TIMEOUT_MS: u64 = 1_000;
 const FLASH_SETTLE_MS: u64 = 200;
@@ -1042,7 +1042,7 @@ fn open_port(config: &ClientConfig) -> Result<Box<dyn serialport::SerialPort>, C
     let mut port = serialport::new(&config.port_name, config.baud)
         .timeout(Duration::from_millis(DEFAULT_TIMEOUT_MS))
         .open()
-        .map_err(|err| CliError::transport(format!("failed to open {}: {err}", config.port_name)))?;
+        .map_err(|err| classify_open_port_error(&config.port_name, &err))?;
     port.write_data_terminal_ready(true)
         .map_err(|err| CliError::transport(format!("failed to set DTR on {}: {err}", config.port_name)))?;
     thread::sleep(Duration::from_millis(200));
@@ -1077,11 +1077,14 @@ fn read_response(port: &mut dyn serialport::SerialPort) -> Result<ProtocolFrame,
             }
             Ok(_) => {}
             Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(err) => return Err(CliError::transport(format!("failed to read response: {err}"))),
+            Err(err) => return Err(classify_read_error(&err)),
         }
         thread::sleep(Duration::from_millis(READ_RETRY_DELAY_MS));
     }
-    Err(CliError::transport("timed out waiting for device response"))
+    Err(CliError::transport_with_condition(
+        "timed out waiting for device response; the board may still be rebooting or another service may be interfering with the serial port",
+        TransportCondition::TimedOut,
+    ))
 }
 
 fn find_frame_in_buffer(buffer: &[u8]) -> Option<ProtocolFrame> {
@@ -1175,6 +1178,54 @@ fn copy_array<const N: usize>(bytes: &[u8]) -> Result<[u8; N], CliError> {
     bytes
         .try_into()
         .map_err(|_| CliError::invalid_response("unexpected payload length"))
+}
+
+fn classify_open_port_error(port_name: &str, err: &serialport::Error) -> CliError {
+    let lowered = err.to_string().to_ascii_lowercase();
+    if lowered.contains("resource busy") || lowered.contains("device or resource busy") {
+        return CliError::transport_with_condition(
+            format!(
+                "failed to open {port_name}: device or resource busy; another process or service such as ModemManager may be holding the port"
+            ),
+            TransportCondition::BusyPort,
+        );
+    }
+    if lowered.contains("permission denied") {
+        return CliError::transport_with_condition(
+            format!(
+                "failed to open {port_name}: permission denied; check the device-node group membership such as uucp or dialout"
+            ),
+            TransportCondition::MissingPermission,
+        );
+    }
+    if lowered.contains("no such file")
+        || lowered.contains("not found")
+        || lowered.contains("cannot find")
+    {
+        return CliError::transport_with_condition(
+            format!(
+                "failed to open {port_name}: device node is missing; the board may have re-enumerated or may not be running the expected firmware"
+            ),
+            TransportCondition::MissingDevice,
+        );
+    }
+    CliError::transport_with_condition(
+        format!("failed to open {port_name}: {err}"),
+        TransportCondition::Other,
+    )
+}
+
+fn classify_read_error(err: &std::io::Error) -> CliError {
+    if err.kind() == std::io::ErrorKind::TimedOut {
+        return CliError::transport_with_condition(
+            "timed out waiting for device response; the board may still be rebooting or another service may be interfering with the serial port",
+            TransportCondition::TimedOut,
+        );
+    }
+    CliError::transport_with_condition(
+        format!("failed to read response: {err}"),
+        TransportCondition::Other,
+    )
 }
 
 fn decode_key_list(payload: &[u8]) -> Result<Vec<KeyListRecord>, CliError> {

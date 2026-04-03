@@ -225,7 +225,9 @@ fn parse_args() -> Result<ProbeConfig, DynError> {
                 baud = value.parse::<u32>()?;
             }
             "--help" | "-h" => {
-                println!("Usage: cargo probe -- --port /dev/ttyACM0 [--baud 115200]");
+                println!(
+                    "Usage: cargo probe -- --port /dev/ttyACM0 [--baud 115200]\nEngineering validation tool for on-device regression coverage."
+                );
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument: {other}").into()),

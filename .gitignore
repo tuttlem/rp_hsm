@@ -1,8 +1,11 @@
 /target
 
 .idea
+.vscode
 .codex
 debug
 release
 *.log
+*.prof*
+*.tmp
 .env*

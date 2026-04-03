@@ -12,6 +12,16 @@ Keep this file aligned with:
 - new workspace binaries under [host_tools/src/bin](/home/michael/src/embedded/rp_hsm/host_tools/src/bin)
 - any new firmware features that change the required invocation flags
 
+## Supported Host Surfaces
+
+- `cargo rphsmtool`: supported operator CLI
+- `host_tools::client`: supported machine-consumable host integration surface
+- `cargo probe`: engineering validation tool
+
+Do not treat `probe_protocol` output as a stable integration API. It is meant
+to exercise the device aggressively during development, not to be the default
+operator or application boundary.
+
 ## Common Commands
 
 ### Build firmware
@@ -257,6 +267,30 @@ Behavior:
   proof material into shell history.
 - Reserved future verbs such as `sym-encrypt` and `sym-decrypt` fail explicitly
   instead of pretending to work before the firmware supports them.
+- Busy serial ports, missing permissions, and missing/re-enumerated device
+  nodes are reported as host-side transport issues with actionable hints instead
+  of being mislabeled as device authorization failures.
+
+For machine integrations, prefer the supported Rust client surface instead of
+scraping CLI output. A minimal example looks like this:
+
+```rust
+use host_tools::{ClientConfig, Role, SerialBackend};
+
+fn read_status() -> Result<(), Box<dyn std::error::Error>> {
+    let backend = SerialBackend::new(ClientConfig::new(
+        "/dev/ttyACM0".to_string(),
+        115_200,
+    ));
+    let report = backend.status_report()?;
+    println!("device_state={}", report.device_state);
+
+    let proof = std::env::var("RPHSM_PROOF")?;
+    let random = backend.get_random(Role::Administrator, proof.as_bytes(), 16)?;
+    println!("random_len={}", random.len());
+    Ok(())
+}
+```
 
 Examples:
 

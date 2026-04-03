@@ -39,7 +39,12 @@ pub enum CommandSpec {
     RecoverToProvisioned { auth: AuthOptions },
     ReactivateRecovered { transition_id: u32, auth: AuthOptions },
     GetRandom { bytes: u8, auth: AuthOptions },
-    GetAuditPage { start_sequence: u32, max_events: u8, auth: AuthOptions },
+    GetAuditPage {
+        start_sequence: u32,
+        max_events: u8,
+        one_line: bool,
+        auth: AuthOptions,
+    },
     Sign { key_id: u8, auth: AuthOptions },
     Verify {
         algorithm: VerifyAlgorithm,
@@ -99,6 +104,7 @@ where
     let mut dual_control = None;
     let mut start_sequence = None;
     let mut max_events = None;
+    let mut one_line = false;
 
     let mut idx = 0usize;
     while idx < rest.len() {
@@ -235,6 +241,9 @@ where
                 };
                 max_events = Some(parse_u8(value)?);
             }
+            "--one-line" => {
+                one_line = true;
+            }
             "--help" | "-h" => {
                 return Err(CliError::usage(command_usage(&command_name, show_all_help)));
             }
@@ -262,6 +271,7 @@ where
         dual_control,
         start_sequence,
         max_events,
+        one_line,
     )?;
 
     Ok(ParsedArgs { global, command })
@@ -331,6 +341,7 @@ fn build_command(
     dual_control: Option<bool>,
     start_sequence: Option<u32>,
     max_events: Option<u8>,
+    one_line: bool,
 ) -> Result<CommandSpec, CliError> {
     match command_name.as_str() {
         "find" => Ok(CommandSpec::Find),
@@ -421,6 +432,7 @@ fn build_command(
         "get-audit-page" | "audit-page" => Ok(CommandSpec::GetAuditPage {
             start_sequence: start_sequence.unwrap_or(0),
             max_events: max_events.ok_or_else(|| CliError::usage("missing --max-events for get-audit-page"))?,
+            one_line,
             auth: parse_auth(role, proof_env, &[Role::Administrator, Role::Recovery])?,
         }),
         "sign" | "key-sign" => Ok(CommandSpec::Sign {
@@ -530,7 +542,7 @@ fn command_usage(command: &str, show_all_help: bool) -> String {
         "recover-to-provisioned" => "Usage: rphsmtool recover-to-provisioned [--device PATH] --role recovery --proof-env VAR [--baud 115200]".into(),
         "reactivate-recovered" => "Usage: rphsmtool reactivate-recovered [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]".into(),
         "get-random" => "Usage: rphsmtool get-random [--device PATH] --bytes N --role administrator|key-manager --proof-env VAR [--baud 115200]".into(),
-        "get-audit-page" => "Usage: rphsmtool get-audit-page [--device PATH] [--start-sequence N] --max-events N --role administrator|recovery --proof-env VAR [--baud 115200]".into(),
+        "get-audit-page" => "Usage: rphsmtool get-audit-page [--device PATH] [--start-sequence N] --max-events N [--one-line] --role administrator|recovery --proof-env VAR [--baud 115200]".into(),
         "sign" => "Usage: rphsmtool sign [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin".into(),
         "verify" => "Usage: rphsmtool verify [--device PATH] --algorithm ed25519|p256 --public-key-hex HEX --signature-hex HEX [--baud 115200] < message.bin".into(),
         "import-wrapped-key" => "Usage: rphsmtool import-wrapped-key [--device PATH] --role key-manager --proof-env VAR [--baud 115200] < envelope.bin".into(),
@@ -576,7 +588,7 @@ pub fn usage_text() -> String {
         "  rphsmtool logout [--device PATH] --role bootstrap|administrator|recovery|key-manager --proof-env VAR [--baud 115200]",
         "",
         "Advanced Commands:",
-        "  rphsmtool get-audit-page [--device PATH] [--start-sequence N] --max-events N --role administrator|recovery --proof-env VAR [--baud 115200]",
+        "  rphsmtool get-audit-page [--device PATH] [--start-sequence N] --max-events N [--one-line] --role administrator|recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool recovery enter [--device PATH] --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool recovery recover [--device PATH] --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool recovery reactivate [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]",
@@ -585,12 +597,17 @@ pub fn usage_text() -> String {
         "  rphsmtool key revoke [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200]",
         "  rphsmtool key destroy [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200]",
         "",
-        "Developer Commands:",
+        "Developer Commands (development-only):",
         "  rphsmtool dev reset [--device PATH] [--baud 115200]",
         "  rphsmtool dev reboot [--device PATH] [--baud 115200]",
         "  rphsmtool dev store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store|corrupt-persisted-audit|rollback-persisted-audit [--baud 115200]",
         "  rphsmtool dev update-fault [--device PATH] --action ambiguous-firmware-activation|rollback-firmware-version [--baud 115200]",
         "  rphsmtool dev set-policy [--device PATH] --dual-control on|off [--baud 115200]",
+        "",
+        "Support Boundaries:",
+        "  rphsmtool is the supported operator CLI",
+        "  host_tools::client is the supported machine-consumable library surface",
+        "  cargo probe is an engineering validation tool, not the default operator path",
         "",
         "Policy Notes:",
         "  bounded denials are reported as command-unavailable, state-denied, role/session-denied,",
@@ -637,7 +654,7 @@ pub fn all_usage_text() -> String {
         "  rphsmtool reactivate-recovered [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool recovery reactivate [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool get-random [--device PATH] --bytes N --role administrator|key-manager --proof-env VAR [--baud 115200]",
-        "  rphsmtool get-audit-page [--device PATH] [--start-sequence N] --max-events N --role administrator|recovery --proof-env VAR [--baud 115200]",
+        "  rphsmtool get-audit-page [--device PATH] [--start-sequence N] --max-events N [--one-line] --role administrator|recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool sign [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin",
         "  rphsmtool key sign [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin",
         "  rphsmtool verify [--device PATH] --algorithm ed25519|p256 --public-key-hex HEX --signature-hex HEX [--baud 115200] < message.bin",
@@ -774,6 +791,13 @@ mod tests {
     }
 
     #[test]
+    fn default_help_mentions_support_boundaries() {
+        let text = super::usage_text();
+        assert!(text.contains("Support Boundaries:"));
+        assert!(text.contains("cargo probe is an engineering validation tool"));
+    }
+
+    #[test]
     fn rejects_missing_auth_inputs() {
         let err = parse(&["rphsmtool", "get-random", "--bytes", "4"]).expect_err("must fail");
         assert!(err.message.contains("missing --role"));
@@ -783,5 +807,25 @@ mod tests {
     fn marks_reserved_verbs_as_unsupported() {
         let parsed = parse(&["rphsmtool", "sym-encrypt"]).expect("parse");
         assert!(matches!(parsed.command, CommandSpec::Unsupported { .. }));
+    }
+
+    #[test]
+    fn parses_get_audit_page_one_line_flag() {
+        let parsed = parse(&[
+            "rphsmtool",
+            "get-audit-page",
+            "--max-events",
+            "4",
+            "--one-line",
+            "--role",
+            "administrator",
+            "--proof-env",
+            "RPHSM_ADMIN",
+        ])
+        .expect("parse");
+        match parsed.command {
+            CommandSpec::GetAuditPage { one_line, .. } => assert!(one_line),
+            _ => panic!("wrong command"),
+        }
     }
 }

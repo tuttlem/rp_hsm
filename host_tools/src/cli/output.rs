@@ -14,6 +14,29 @@ pub enum ExitStatus {
     Failure = 8,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorKind {
+    Usage,
+    NotFound,
+    Unsupported,
+    DeviceDenied,
+    Transport,
+    InvalidResponse,
+    Failure,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransportCondition {
+    BusyPort,
+    MissingPermission,
+    MissingDevice,
+    ReenumeratingDevice,
+    CompetingService,
+    TimedOut,
+    IncompatibleFirmware,
+    Other,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandOutput {
     Text(String),
@@ -34,6 +57,8 @@ impl CommandOutput {
 pub struct CliError {
     pub message: String,
     pub exit_status: ExitStatus,
+    pub kind: ErrorKind,
+    pub transport_condition: Option<TransportCondition>,
 }
 
 impl CliError {
@@ -41,6 +66,8 @@ impl CliError {
         Self {
             message: message.into(),
             exit_status: ExitStatus::Usage,
+            kind: ErrorKind::Usage,
+            transport_condition: None,
         }
     }
 
@@ -48,6 +75,8 @@ impl CliError {
         Self {
             message: message.into(),
             exit_status: ExitStatus::NotFound,
+            kind: ErrorKind::NotFound,
+            transport_condition: None,
         }
     }
 
@@ -55,6 +84,8 @@ impl CliError {
         Self {
             message: message.into(),
             exit_status: ExitStatus::Unsupported,
+            kind: ErrorKind::Unsupported,
+            transport_condition: None,
         }
     }
 
@@ -62,13 +93,24 @@ impl CliError {
         Self {
             message: message.into(),
             exit_status: ExitStatus::Auth,
+            kind: ErrorKind::DeviceDenied,
+            transport_condition: None,
         }
     }
 
     pub fn transport(message: impl Into<String>) -> Self {
+        Self::transport_with_condition(message, TransportCondition::Other)
+    }
+
+    pub fn transport_with_condition(
+        message: impl Into<String>,
+        condition: TransportCondition,
+    ) -> Self {
         Self {
             message: message.into(),
             exit_status: ExitStatus::Transport,
+            kind: ErrorKind::Transport,
+            transport_condition: Some(condition),
         }
     }
 
@@ -76,6 +118,8 @@ impl CliError {
         Self {
             message: message.into(),
             exit_status: ExitStatus::InvalidResponse,
+            kind: ErrorKind::InvalidResponse,
+            transport_condition: None,
         }
     }
 
@@ -83,6 +127,8 @@ impl CliError {
         Self {
             message: message.into(),
             exit_status: ExitStatus::Failure,
+            kind: ErrorKind::Failure,
+            transport_condition: None,
         }
     }
 }
@@ -111,30 +157,48 @@ pub fn lines_output(lines: &[String]) -> CommandOutput {
 }
 
 #[must_use]
-pub fn audit_page_lines(device: &str, page: &AuditPage) -> Vec<String> {
+pub fn audit_page_lines(device: &str, page: &AuditPage, one_line: bool) -> Vec<String> {
     let mut lines = vec![
-        format!("device={device}"),
-        format!("entry_count={}", page.entries.len()),
+        format!("Device: {device}"),
+        format!("Entries: {}", page.entries.len()),
         format!(
-            "next_sequence={}",
+            "Next sequence: {}",
             page.next_sequence
                 .map_or_else(|| "none".to_string(), |value| value.to_string())
         ),
-        format!("truncated={}", if page.truncated { "yes" } else { "no" }),
+        format!("Truncated: {}", if page.truncated { "yes" } else { "no" }),
     ];
     for entry in &page.entries {
-        lines.push(format!(
-            "entry sequence={} class=0x{:02x} code=0x{:02x} device_revision={} lifecycle_state={} actor_role={} session_kind={} result_class={} detail={}",
-            entry.sequence_id,
-            entry.event_class,
-            entry.event_code,
-            entry.device_revision,
-            entry.lifecycle_state,
-            entry.actor_role,
-            entry.session_kind,
-            entry.result_class,
-            hex_bytes(&entry.detail),
-        ));
+        if one_line {
+            lines.push(format!(
+                "#{}  {}  {}/{}  actor={}  result={}  detail={}",
+                entry.sequence_id,
+                audit_session_kind_name(entry.session_kind),
+                audit_event_class_name(entry.event_class),
+                audit_event_code_name(entry.event_class, entry.event_code),
+                audit_role_name(entry.actor_role),
+                audit_result_class_name(entry.result_class),
+                audit_detail_text(&entry.detail),
+            ));
+        } else {
+            lines.push(String::new());
+            lines.push(format!(
+                "Sequence {} | {} session",
+                entry.sequence_id,
+                audit_session_kind_name(entry.session_kind),
+            ));
+            lines.push(format!(
+                "  Event: {} / {}",
+                audit_event_class_name(entry.event_class),
+                audit_event_code_name(entry.event_class, entry.event_code),
+            ));
+            lines.push(format!("  Actor: {}", audit_role_name(entry.actor_role)));
+            lines.push(format!(
+                "  Result: {}",
+                audit_result_class_name(entry.result_class)
+            ));
+            lines.push(format!("  Detail: {}", audit_detail_text(&entry.detail)));
+        }
     }
     lines
 }
@@ -148,9 +212,104 @@ fn hex_bytes(bytes: &[u8]) -> String {
     text
 }
 
+fn audit_role_name(value: u8) -> &'static str {
+    match value {
+        0x00 => "public",
+        0x02 => "bootstrap",
+        0x03 => "administrator",
+        0x04 => "recovery",
+        0x05 => "developer",
+        0x06 => "key-manager",
+        _ => "unknown",
+    }
+}
+
+fn audit_session_kind_name(value: u8) -> &'static str {
+    match value {
+        0x00 => "none",
+        0x01 => "public",
+        0x02 => "bootstrap",
+        0x03 => "administrator",
+        0x04 => "recovery",
+        0x05 => "developer",
+        0x06 => "key-manager",
+        _ => "unknown",
+    }
+}
+
+fn audit_event_class_name(value: u8) -> &'static str {
+    match value {
+        0x01 => "system",
+        0x02 => "authentication",
+        0x03 => "lifecycle",
+        0x04 => "key-store",
+        0x05 => "policy",
+        0x06 => "crypto",
+        0x07 => "audit",
+        0x08 => "firmware-update",
+        _ => "unknown",
+    }
+}
+
+fn audit_event_code_name(class: u8, code: u8) -> &'static str {
+    match (class, code) {
+        (0x01, 0x01) => "developer-reset",
+        (0x01, 0x02) => "developer-reboot",
+        (0x02, 0x01) => "authentication-begin",
+        (0x02, 0x02) => "authentication-complete",
+        (0x02, 0x03) => "authentication-denied",
+        (0x03, 0x01) => "state-transition",
+        (0x03, 0x02) => "recovery-entry",
+        (0x03, 0x03) => "zeroize",
+        (0x04, 0x01) => "key-created",
+        (0x04, 0x02) => "key-listed",
+        (0x04, 0x03) => "key-metadata",
+        (0x04, 0x04) => "key-revoked",
+        (0x04, 0x05) => "key-destroyed",
+        (0x05, 0x01) => "policy-updated",
+        (0x05, 0x02) => "approval-required",
+        (0x05, 0x03) => "approval-stale",
+        (0x06, 0x01) => "sign",
+        (0x06, 0x02) => "verify",
+        (0x06, 0x03) => "random-generated",
+        (0x07, 0x01) => "audit-page-read",
+        (0x08, 0x01) => "update-begin",
+        (0x08, 0x02) => "update-chunk",
+        (0x08, 0x03) => "update-finalize",
+        (0x08, 0x04) => "update-activate",
+        (0x08, 0x05) => "update-recover",
+        _ => "unknown",
+    }
+}
+
+fn audit_result_class_name(value: u8) -> &'static str {
+    match value {
+        0x01 => "success",
+        0x02 => "command-unavailable",
+        0x03 => "state-denied",
+        0x04 => "authorization-denied",
+        0x05 => "key-policy-denied",
+        0x06 => "approval-required",
+        0x07 => "approval-stale",
+        0x08 => "failed-closed",
+        _ => "unknown",
+    }
+}
+
+fn audit_detail_text(detail: &[u8]) -> String {
+    if detail.is_empty() {
+        "none".to_string()
+    } else {
+        hex_bytes(detail)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CliError, CommandOutput, ExitStatus, audit_page_lines, lines_output};
+    use super::{
+        CliError, CommandOutput, ErrorKind, ExitStatus, TransportCondition, audit_page_lines,
+        lines_output,
+    };
     use crate::client::{AuditEntryRecord, AuditPage};
 
     #[test]
@@ -169,6 +328,7 @@ mod tests {
     fn usage_error_uses_usage_exit_code() {
         let err = CliError::usage("bad args");
         assert_eq!(err.exit_status, ExitStatus::Usage);
+        assert_eq!(err.kind, ErrorKind::Usage);
     }
 
     #[test]
@@ -190,10 +350,53 @@ mod tests {
                 next_sequence: Some(8),
                 truncated: true,
             },
+            false,
         );
-        assert_eq!(lines[0], "device=/dev/test");
-        assert_eq!(lines[1], "entry_count=1");
-        assert!(lines[3].contains("truncated=yes"));
-        assert!(lines[4].contains("detail=0c02"));
+        assert_eq!(lines[0], "Device: /dev/test");
+        assert_eq!(lines[1], "Entries: 1");
+        assert_eq!(lines[3], "Truncated: yes");
+        assert_eq!(lines[5], "Sequence 7 | administrator session");
+        assert_eq!(lines[6], "  Event: policy / unknown");
+        assert_eq!(lines[7], "  Actor: administrator");
+        assert_eq!(lines[8], "  Result: success");
+        assert_eq!(lines[9], "  Detail: 0c02");
+    }
+
+    #[test]
+    fn audit_page_one_line_output_is_dense() {
+        let lines = audit_page_lines(
+            "/dev/test",
+            &AuditPage {
+                entries: vec![AuditEntryRecord {
+                    sequence_id: 7,
+                    event_class: 0x05,
+                    event_code: 0x07,
+                    device_revision: 11,
+                    lifecycle_state: 0x03,
+                    actor_role: 0x03,
+                    session_kind: 0x03,
+                    result_class: 0x01,
+                    detail: vec![0x0c, 0x02],
+                }],
+                next_sequence: Some(8),
+                truncated: true,
+            },
+            true,
+        );
+        assert_eq!(
+            lines[4],
+            "#7  administrator  policy/unknown  actor=administrator  result=success  detail=0c02"
+        );
+    }
+
+    #[test]
+    fn transport_error_can_carry_condition() {
+        let err = CliError::transport_with_condition(
+            "busy",
+            TransportCondition::BusyPort,
+        );
+        assert_eq!(err.exit_status, ExitStatus::Transport);
+        assert_eq!(err.kind, ErrorKind::Transport);
+        assert_eq!(err.transport_condition, Some(TransportCondition::BusyPort));
     }
 }

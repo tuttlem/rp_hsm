@@ -63,18 +63,23 @@ pub fn resolve_device_selector(
                 Ok(path.to_string())
             } else {
                 Err(CliError::not_found(format!(
-                    "device '{path}' was not found among compatible RP HSM targets"
+                    "device '{path}' was not found among compatible RP HSM targets; the board may have re-enumerated or the connected firmware may be incompatible"
                 )))
             }
         }
         None => match discovered {
             [device] => Ok(device.device_path.clone()),
-            [] => Err(CliError::not_found("no compatible RP HSM devices found")),
+            [] => Err(CliError::not_found(no_compatible_devices_message())),
             _ => Err(CliError::failure(
                 "multiple compatible RP HSM devices found; specify --device explicitly",
             )),
         },
     }
+}
+
+#[must_use]
+pub const fn no_compatible_devices_message() -> &'static str {
+    "no compatible RP HSM devices found; check serial permissions, reconnect after reboot, or stop competing services such as ModemManager"
 }
 
 #[must_use]
@@ -84,7 +89,10 @@ pub fn looks_like_candidate(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{DiscoveredDevice, looks_like_candidate, resolve_device_selector};
+    use super::{
+        DiscoveredDevice, looks_like_candidate, no_compatible_devices_message,
+        resolve_device_selector,
+    };
 
     fn dev(path: &str) -> DiscoveredDevice {
         DiscoveredDevice {
@@ -121,5 +129,11 @@ mod tests {
         assert!(looks_like_candidate("/dev/ttyACM0"));
         assert!(looks_like_candidate("/dev/ttyUSB0"));
         assert!(!looks_like_candidate("/dev/ttyS0"));
+    }
+
+    #[test]
+    fn empty_discovery_uses_actionable_message() {
+        let err = resolve_device_selector(None, &[]).expect_err("must fail");
+        assert_eq!(err.message, no_compatible_devices_message());
     }
 }
