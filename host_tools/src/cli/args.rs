@@ -19,9 +19,14 @@ pub struct AuthOptions {
 pub enum CommandSpec {
     Find,
     Status,
+    UpdateStatus { auth: AuthOptions },
+    ApplyUpdate { image_path: String, version: String, auth: AuthOptions },
+    AbortUpdate { session_id: u32, auth: AuthOptions },
+    RecoverTrustedFirmware { auth: AuthOptions },
     DeveloperReset,
     DeveloperReboot,
     DeveloperStoreFault { action: DeveloperFaultAction },
+    DeveloperUpdateFault { action: DeveloperFaultAction },
     DeveloperSetPolicy { update: PolicyProfileUpdate },
     Provision { proof_env: String, label: String },
     ProvisionBootstrap { proof_env: String, label: String },
@@ -84,9 +89,12 @@ where
     let mut key_id = None;
     let mut label = None;
     let mut algorithm = None;
+    let mut image = None;
+    let mut version = None;
     let mut public_key_hex = None;
     let mut signature_hex = None;
     let mut transition_id = None;
+    let mut session_id = None;
     let mut action = None;
     let mut dual_control = None;
     let mut start_sequence = None;
@@ -157,6 +165,20 @@ where
                 };
                 algorithm = Some(VerifyAlgorithm::parse(value)?);
             }
+            "--image" => {
+                idx += 1;
+                let Some(value) = rest.get(idx) else {
+                    return Err(CliError::usage("missing value for --image"));
+                };
+                image = Some(value.clone());
+            }
+            "--version" => {
+                idx += 1;
+                let Some(value) = rest.get(idx) else {
+                    return Err(CliError::usage("missing value for --version"));
+                };
+                version = Some(value.clone());
+            }
             "--public-key-hex" => {
                 idx += 1;
                 let Some(value) = rest.get(idx) else {
@@ -177,6 +199,13 @@ where
                     return Err(CliError::usage("missing value for --transition-id"));
                 };
                 transition_id = Some(parse_u32(value)?);
+            }
+            "--session-id" => {
+                idx += 1;
+                let Some(value) = rest.get(idx) else {
+                    return Err(CliError::usage("missing value for --session-id"));
+                };
+                session_id = Some(parse_u32(value)?);
             }
             "--action" => {
                 idx += 1;
@@ -223,9 +252,12 @@ where
         key_id,
         label,
         algorithm,
+        image,
+        version,
         public_key_hex,
         signature_hex,
         transition_id,
+        session_id,
         action,
         dual_control,
         start_sequence,
@@ -289,9 +321,12 @@ fn build_command(
     key_id: Option<u8>,
     label: Option<String>,
     algorithm: Option<VerifyAlgorithm>,
+    image: Option<String>,
+    version: Option<String>,
     public_key_hex: Option<String>,
     signature_hex: Option<String>,
     transition_id: Option<u32>,
+    session_id: Option<u32>,
     action: Option<DeveloperFaultAction>,
     dual_control: Option<bool>,
     start_sequence: Option<u32>,
@@ -300,6 +335,21 @@ fn build_command(
     match command_name.as_str() {
         "find" => Ok(CommandSpec::Find),
         "status" => Ok(CommandSpec::Status),
+        "update-status" => Ok(CommandSpec::UpdateStatus {
+            auth: parse_auth(role, proof_env, &[Role::Administrator, Role::Recovery])?,
+        }),
+        "apply-update" => Ok(CommandSpec::ApplyUpdate {
+            image_path: image.ok_or_else(|| CliError::usage("missing --image for apply-update"))?,
+            version: version.ok_or_else(|| CliError::usage("missing --version for apply-update"))?,
+            auth: parse_auth(role, proof_env, &[Role::Administrator])?,
+        }),
+        "abort-update" => Ok(CommandSpec::AbortUpdate {
+            session_id: session_id.ok_or_else(|| CliError::usage("missing --session-id for abort-update"))?,
+            auth: parse_auth(role, proof_env, &[Role::Administrator])?,
+        }),
+        "recover-trusted-firmware" => Ok(CommandSpec::RecoverTrustedFirmware {
+            auth: parse_auth(role, proof_env, &[Role::Recovery])?,
+        }),
         "reset" | "developer-reset" | "dev-reset" => Ok(CommandSpec::DeveloperReset),
         "developer-set-policy" | "dev-set-policy" => Ok(CommandSpec::DeveloperSetPolicy {
             update: PolicyProfileUpdate {
@@ -316,6 +366,9 @@ fn build_command(
         "developer-reboot" | "dev-reboot" => Ok(CommandSpec::DeveloperReboot),
         "developer-store-fault" | "dev-store-fault" => Ok(CommandSpec::DeveloperStoreFault {
             action: action.ok_or_else(|| CliError::usage("missing --action for developer-store-fault"))?,
+        }),
+        "developer-update-fault" | "dev-update-fault" => Ok(CommandSpec::DeveloperUpdateFault {
+            action: action.ok_or_else(|| CliError::usage("missing --action for developer-update-fault"))?,
         }),
         "provision-bootstrap" => Ok(CommandSpec::ProvisionBootstrap {
             proof_env: proof_env
@@ -451,6 +504,10 @@ fn command_usage(command: &str, show_all_help: bool) -> String {
     match command {
         "find" => "Usage: rphsmtool find [--baud 115200]".into(),
         "status" => "Usage: rphsmtool status [--device PATH] [--baud 115200]".into(),
+        "update-status" => "Usage: rphsmtool update-status [--device PATH] --role administrator|recovery --proof-env VAR [--baud 115200]".into(),
+        "apply-update" => "Usage: rphsmtool apply-update [--device PATH] --image FILE --version EPOCH.MAJOR.MINOR.PATCH --role administrator --proof-env VAR [--baud 115200]".into(),
+        "abort-update" => "Usage: rphsmtool abort-update [--device PATH] --session-id ID --role administrator --proof-env VAR [--baud 115200]".into(),
+        "recover-trusted-firmware" => "Usage: rphsmtool recover-trusted-firmware [--device PATH] --role recovery --proof-env VAR [--baud 115200]".into(),
         "reset" => "Usage: rphsmtool reset [--device PATH] [--baud 115200]".into(),
         "provision" => "Usage: rphsmtool provision [--device PATH] --proof-env VAR [--label NAME] [--baud 115200]".into(),
         "developer-reset" => "Usage: rphsmtool developer-reset [--device PATH] [--baud 115200]".into(),
@@ -459,6 +516,8 @@ fn command_usage(command: &str, show_all_help: bool) -> String {
         "dev-reboot" => "Usage: rphsmtool dev reboot [--device PATH] [--baud 115200]".into(),
         "developer-store-fault" => "Usage: rphsmtool developer-store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store|corrupt-persisted-audit|rollback-persisted-audit [--baud 115200]".into(),
         "dev-store-fault" => "Usage: rphsmtool dev store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store|corrupt-persisted-audit|rollback-persisted-audit [--baud 115200]".into(),
+        "developer-update-fault" => "Usage: rphsmtool developer-update-fault [--device PATH] --action ambiguous-firmware-activation|rollback-firmware-version [--baud 115200]".into(),
+        "dev-update-fault" => "Usage: rphsmtool dev update-fault [--device PATH] --action ambiguous-firmware-activation|rollback-firmware-version [--baud 115200]".into(),
         "developer-set-policy" => "Usage: rphsmtool developer-set-policy [--device PATH] --dual-control on|off [--baud 115200]".into(),
         "dev-set-policy" => "Usage: rphsmtool dev set-policy [--device PATH] --dual-control on|off [--baud 115200]".into(),
         "provision-bootstrap" => "Usage: rphsmtool provision-bootstrap [--device PATH] --proof-env VAR [--label NAME] [--baud 115200]".into(),
@@ -506,6 +565,9 @@ pub fn usage_text() -> String {
         "  rphsmtool get-key-metadata [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200]",
         "",
         "Admin Commands:",
+        "  rphsmtool update-status [--device PATH] --role administrator|recovery --proof-env VAR [--baud 115200]",
+        "  rphsmtool apply-update [--device PATH] --image FILE --version EPOCH.MAJOR.MINOR.PATCH --role administrator --proof-env VAR [--baud 115200]",
+        "  rphsmtool abort-update [--device PATH] --session-id ID --role administrator --proof-env VAR [--baud 115200]",
         "  rphsmtool provision [--device PATH] --proof-env VAR [--label NAME] [--baud 115200]",
         "  rphsmtool reset [--device PATH] [--baud 115200]",
         "  rphsmtool lock [--device PATH] --role administrator --proof-env VAR [--baud 115200]",
@@ -518,6 +580,7 @@ pub fn usage_text() -> String {
         "  rphsmtool recovery enter [--device PATH] --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool recovery recover [--device PATH] --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool recovery reactivate [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]",
+        "  rphsmtool recover-trusted-firmware [--device PATH] --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool key import-wrapped [--device PATH] --role key-manager --proof-env VAR [--baud 115200] < envelope.bin",
         "  rphsmtool key revoke [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200]",
         "  rphsmtool key destroy [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200]",
@@ -526,6 +589,7 @@ pub fn usage_text() -> String {
         "  rphsmtool dev reset [--device PATH] [--baud 115200]",
         "  rphsmtool dev reboot [--device PATH] [--baud 115200]",
         "  rphsmtool dev store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store|corrupt-persisted-audit|rollback-persisted-audit [--baud 115200]",
+        "  rphsmtool dev update-fault [--device PATH] --action ambiguous-firmware-activation|rollback-firmware-version [--baud 115200]",
         "  rphsmtool dev set-policy [--device PATH] --dual-control on|off [--baud 115200]",
         "",
         "Policy Notes:",
@@ -544,6 +608,10 @@ pub fn all_usage_text() -> String {
         "Usage:",
         "  rphsmtool find [--baud 115200]",
         "  rphsmtool status [--device PATH] [--baud 115200]",
+        "  rphsmtool update-status [--device PATH] --role administrator|recovery --proof-env VAR [--baud 115200]",
+        "  rphsmtool apply-update [--device PATH] --image FILE --version EPOCH.MAJOR.MINOR.PATCH --role administrator --proof-env VAR [--baud 115200]",
+        "  rphsmtool abort-update [--device PATH] --session-id ID --role administrator --proof-env VAR [--baud 115200]",
+        "  rphsmtool recover-trusted-firmware [--device PATH] --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool reset [--device PATH] [--baud 115200]",
         "  rphsmtool developer-reset [--device PATH] [--baud 115200]",
         "  rphsmtool dev reset [--device PATH] [--baud 115200]",
@@ -551,6 +619,8 @@ pub fn all_usage_text() -> String {
         "  rphsmtool dev reboot [--device PATH] [--baud 115200]",
         "  rphsmtool developer-store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store|corrupt-persisted-audit|rollback-persisted-audit [--baud 115200]",
         "  rphsmtool dev store-fault [--device PATH] --action corrupt-persisted-store|rollback-persisted-store|corrupt-persisted-audit|rollback-persisted-audit [--baud 115200]",
+        "  rphsmtool developer-update-fault [--device PATH] --action ambiguous-firmware-activation|rollback-firmware-version [--baud 115200]",
+        "  rphsmtool dev update-fault [--device PATH] --action ambiguous-firmware-activation|rollback-firmware-version [--baud 115200]",
         "  rphsmtool developer-set-policy [--device PATH] --dual-control on|off [--baud 115200]",
         "  rphsmtool dev set-policy [--device PATH] --dual-control on|off [--baud 115200]",
         "  rphsmtool provision [--device PATH] --proof-env VAR [--label NAME] [--baud 115200]",

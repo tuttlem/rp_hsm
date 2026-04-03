@@ -3,7 +3,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::{RngCore, SeedableRng};
 
 use super::codec::StatusCode;
-use super::command::{CommandDefinition, ReplayPolicy};
+use super::command::{CommandDefinition, CommandId, ReplayPolicy};
 
 pub const RECORD_VERSION: u8 = 1;
 pub const MAX_OWNER_ID_LEN: usize = 16;
@@ -44,6 +44,13 @@ pub const APPROVAL_TICKET_EXPIRY_TICKS: u16 = 8;
 pub const MAX_AUDIT_DETAIL_LEN: usize = 12;
 pub const MAX_AUDIT_EVENTS: usize = 32;
 pub const MAX_AUDIT_PAGE_EVENTS: usize = 4;
+pub const UPDATE_MANIFEST_VERSION: u8 = 1;
+pub const UPDATE_SIGNATURE_ALGORITHM_ED25519: u8 = 0x01;
+pub const MAX_FIRMWARE_SIGNATURE_LEN: usize = 64;
+pub const MAX_FIRMWARE_IMAGE_SIZE: usize = 1024;
+pub const MAX_FIRMWARE_CHUNK_LEN: usize = 128;
+pub const UPDATE_SERVICE_VERSION: u8 = 1;
+pub const PROTECTED_ACTION_FIRMWARE_UPDATE: u16 = 0x0008;
 
 const FINALIZE_MARKER: u8 = 0xa5;
 const REACTIVATE_MARKER: u8 = 0xa6;
@@ -126,6 +133,7 @@ pub enum ProtectedActionClass {
     DestructiveAdmin = 0x01,
     DestructiveKey = 0x02,
     RecoveryTransition = 0x03,
+    FirmwareUpdate = 0x04,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,7 +170,8 @@ impl Default for PolicyProfile {
             dual_control_enabled: false,
             protected_action_mask: PROTECTED_ACTION_EXECUTE_ZEROIZE
                 | PROTECTED_ACTION_DESTROY_KEY
-                | PROTECTED_ACTION_RECOVERY_TRANSITION,
+                | PROTECTED_ACTION_RECOVERY_TRANSITION
+                | PROTECTED_ACTION_FIRMWARE_UPDATE,
             developer_commands_visible: false,
         }
     }
@@ -176,9 +185,280 @@ impl PolicyProfile {
             ProtectedActionClass::DestructiveAdmin => PROTECTED_ACTION_EXECUTE_ZEROIZE,
             ProtectedActionClass::DestructiveKey => PROTECTED_ACTION_DESTROY_KEY,
             ProtectedActionClass::RecoveryTransition => PROTECTED_ACTION_RECOVERY_TRANSITION,
+            ProtectedActionClass::FirmwareUpdate => PROTECTED_ACTION_FIRMWARE_UPDATE,
         };
         self.protected_action_mask & bit != 0
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FirmwareVersion {
+    pub security_epoch: u16,
+    pub major: u16,
+    pub minor: u16,
+    pub patch: u16,
+}
+
+impl FirmwareVersion {
+    #[must_use]
+    pub const fn new(security_epoch: u16, major: u16, minor: u16, patch: u16) -> Self {
+        Self {
+            security_epoch,
+            major,
+            minor,
+            patch,
+        }
+    }
+}
+
+impl Default for FirmwareVersion {
+    fn default() -> Self {
+        Self::new(1, 0, 0, 0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BootSlotId {
+    A = 0x01,
+    B = 0x02,
+}
+
+impl BootSlotId {
+    #[must_use]
+    pub const fn other(self) -> Self {
+        match self {
+            Self::A => Self::B,
+            Self::B => Self::A,
+        }
+    }
+
+    #[must_use]
+    pub fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0x01 => Some(Self::A),
+            0x02 => Some(Self::B),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BootSlotState {
+    Empty = 0x01,
+    ActiveTrusted = 0x02,
+    StagedTransfer = 0x03,
+    StagedValidated = 0x04,
+    Invalid = 0x05,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum UpdateTransferPhase {
+    Empty = 0x00,
+    ManifestAccepted = 0x01,
+    Transferring = 0x02,
+    Transferred = 0x03,
+    Validating = 0x04,
+    ActivationPending = 0x05,
+    Aborted = 0x06,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TrustedBootState {
+    ActiveTrusted = 0x01,
+    StagedPending = 0x02,
+    StagedValidating = 0x03,
+    RecoveryRequired = 0x04,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum UpdateResultClass {
+    None = 0x00,
+    Begun = 0x01,
+    Aborted = 0x02,
+    Finalized = 0x03,
+    Activated = 0x04,
+    RollbackDenied = 0x05,
+    SignatureRejected = 0x06,
+    DigestMismatch = 0x07,
+    Interrupted = 0x08,
+    Recovered = 0x09,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum UpdateRecoveryReason {
+    None = 0x00,
+    InterruptedTransfer = 0x01,
+    AmbiguousActivation = 0x02,
+    MetadataCorrupted = 0x03,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FirmwarePackageManifest {
+    pub manifest_version: u8,
+    pub image_version: FirmwareVersion,
+    pub image_size_bytes: u32,
+    pub image_digest_sha256: [u8; 32],
+    pub target_slot_hint: BootSlotId,
+    pub policy_flags: u16,
+    pub signature_algorithm: u8,
+    pub signature_bytes: Vec<u8, MAX_FIRMWARE_SIGNATURE_LEN>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct BootSlotMetadata {
+    pub slot_id: BootSlotId,
+    pub slot_state: BootSlotState,
+    pub stored_version: FirmwareVersion,
+    pub version_present: bool,
+    pub stored_digest: [u8; 32],
+    pub digest_present: bool,
+    pub bootable: bool,
+    pub trusted: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AcceptedFirmwareState {
+    pub active_slot: BootSlotId,
+    pub active_version: FirmwareVersion,
+    pub minimum_accepted_version: FirmwareVersion,
+    pub trusted_boot_state: TrustedBootState,
+    pub last_update_result: UpdateResultClass,
+    pub recovery_required: bool,
+    pub revision_counter: u32,
+}
+
+impl Default for AcceptedFirmwareState {
+    fn default() -> Self {
+        Self {
+            active_slot: BootSlotId::A,
+            active_version: FirmwareVersion::default(),
+            minimum_accepted_version: FirmwareVersion::default(),
+            trusted_boot_state: TrustedBootState::ActiveTrusted,
+            last_update_result: UpdateResultClass::None,
+            recovery_required: false,
+            revision_counter: 1,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpdateTransferState {
+    pub phase: UpdateTransferPhase,
+    pub session_id: u32,
+    pub manifest: Option<FirmwarePackageManifest>,
+    pub bytes_received: u32,
+    pub expected_size: u32,
+    pub staged_image: Vec<u8, MAX_FIRMWARE_IMAGE_SIZE>,
+    pub started_revision: u32,
+    pub policy_revision: u32,
+}
+
+impl Default for UpdateTransferState {
+    fn default() -> Self {
+        Self {
+            phase: UpdateTransferPhase::Empty,
+            session_id: 0,
+            manifest: None,
+            bytes_received: 0,
+            expected_size: 0,
+            staged_image: Vec::new(),
+            started_revision: 0,
+            policy_revision: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecoveryState {
+    pub reason: UpdateRecoveryReason,
+    pub last_trusted_slot: BootSlotId,
+    pub staged_slot: BootSlotId,
+    pub staged_slot_present: bool,
+    pub authorization_required: bool,
+}
+
+impl Default for RecoveryState {
+    fn default() -> Self {
+        Self {
+            reason: UpdateRecoveryReason::None,
+            last_trusted_slot: BootSlotId::A,
+            staged_slot: BootSlotId::B,
+            staged_slot_present: false,
+            authorization_required: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FirmwareUpdateStatus {
+    pub active_slot: BootSlotId,
+    pub active_version: FirmwareVersion,
+    pub minimum_accepted_version: FirmwareVersion,
+    pub transfer_phase: UpdateTransferPhase,
+    pub staged_slot_state: BootSlotState,
+    pub recovery_required: bool,
+    pub last_update_result: UpdateResultClass,
+    pub policy_revision: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FirmwareUpdateBeginResult {
+    pub target_slot: BootSlotId,
+    pub update_session_id: u32,
+    pub expected_size: u32,
+    pub policy_revision: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FirmwareChunkProgress {
+    pub bytes_received: u32,
+    pub remaining_bytes: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FirmwareFinalizeResult {
+    pub staged_slot: BootSlotId,
+    pub validated_version: FirmwareVersion,
+    pub activation_pending: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FirmwareActivationResult {
+    pub next_boot_slot: BootSlotId,
+    pub next_version: FirmwareVersion,
+    pub reboot_required: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FirmwareAbortResult {
+    pub transfer_state_cleared: bool,
+    pub staged_slot_invalidated: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FirmwareRecoveryResult {
+    pub restored_slot: BootSlotId,
+    pub restored_version: FirmwareVersion,
+    pub recovery_required: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BeginFirmwareUpdateRequest {
+    pub manifest: FirmwarePackageManifest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FirmwareChunkRequest {
+    pub update_session_id: u32,
+    pub chunk_offset: u32,
+    pub chunk: Vec<u8, MAX_FIRMWARE_CHUNK_LEN>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1131,6 +1411,27 @@ pub struct PersistentKeyStore {
 pub struct KeyStoreSnapshot {
     pub journal: Vec<KeyStoreRecord, MAX_KEY_JOURNAL_RECORDS>,
     pub anchor: FreshnessAnchor,
+}
+
+impl BootSlotMetadata {
+    #[must_use]
+    pub const fn new(slot_id: BootSlotId, slot_state: BootSlotState) -> Self {
+        Self {
+            slot_id,
+            slot_state,
+            stored_version: FirmwareVersion {
+                security_epoch: 0,
+                major: 0,
+                minor: 0,
+                patch: 0,
+            },
+            version_present: false,
+            stored_digest: [0; 32],
+            digest_present: false,
+            bootable: false,
+            trusted: false,
+        }
+    }
 }
 
 impl AuditEvent {
@@ -2575,6 +2876,8 @@ pub fn evaluate_command_policy(
         }
         AuthorityRole::Administrator => {
             matches!(session_state, SessionState::Administrator | SessionState::Developer)
+                || (definition.id == CommandId::GetFirmwareUpdateStatus
+                    && matches!(session_state, SessionState::Recovery))
         }
         AuthorityRole::Recovery => {
             matches!(session_state, SessionState::Recovery | SessionState::Developer)
@@ -2623,6 +2926,100 @@ pub fn evaluate_key_policy(
     }
 
     PolicyDecision::allow()
+}
+
+/// Returns whether a candidate firmware version satisfies the accepted-version floor
+/// and monotonic update policy.
+///
+/// # Errors
+///
+/// Returns [`DenialClass::KeyPolicyDenied`] when the candidate is below the minimum
+/// accepted version or does not advance beyond the current active version.
+pub fn firmware_version_allowed(
+    candidate: FirmwareVersion,
+    accepted: AcceptedFirmwareState,
+) -> Result<(), DenialClass> {
+    if candidate < accepted.minimum_accepted_version {
+        return Err(DenialClass::KeyPolicyDenied);
+    }
+    if candidate <= accepted.active_version {
+        return Err(DenialClass::KeyPolicyDenied);
+    }
+    Ok(())
+}
+
+#[must_use]
+pub fn default_boot_slots(
+    accepted: AcceptedFirmwareState,
+) -> [BootSlotMetadata; 2] {
+    let mut active = BootSlotMetadata::new(accepted.active_slot, BootSlotState::ActiveTrusted);
+    active.stored_version = accepted.active_version;
+    active.version_present = true;
+    active.bootable = true;
+    active.trusted = true;
+    let inactive = BootSlotMetadata::new(accepted.active_slot.other(), BootSlotState::Empty);
+    if accepted.active_slot == BootSlotId::A {
+        [active, inactive]
+    } else {
+        [inactive, active]
+    }
+}
+
+#[must_use]
+pub fn update_status_view(
+    accepted: AcceptedFirmwareState,
+    transfer: &UpdateTransferState,
+    slots: &[BootSlotMetadata; 2],
+    policy_revision: u32,
+) -> FirmwareUpdateStatus {
+    let staged_index = usize::from(accepted.active_slot == BootSlotId::A);
+    FirmwareUpdateStatus {
+        active_slot: accepted.active_slot,
+        active_version: accepted.active_version,
+        minimum_accepted_version: accepted.minimum_accepted_version,
+        transfer_phase: transfer.phase,
+        staged_slot_state: slots[staged_index].slot_state,
+        recovery_required: accepted.recovery_required,
+        last_update_result: accepted.last_update_result,
+        policy_revision,
+    }
+}
+
+pub fn reconcile_update_boot(
+    accepted: &mut AcceptedFirmwareState,
+    transfer: &mut UpdateTransferState,
+    slots: &mut [BootSlotMetadata; 2],
+    recovery: &mut RecoveryState,
+) {
+    match transfer.phase {
+        UpdateTransferPhase::Empty | UpdateTransferPhase::Aborted => {}
+        UpdateTransferPhase::ManifestAccepted
+        | UpdateTransferPhase::Transferring
+        | UpdateTransferPhase::Transferred
+        | UpdateTransferPhase::Validating => {
+            transfer.phase = UpdateTransferPhase::Aborted;
+            transfer.session_id = 0;
+            transfer.manifest = None;
+            transfer.bytes_received = 0;
+            transfer.expected_size = 0;
+            transfer.staged_image.clear();
+            let staged_index = usize::from(accepted.active_slot == BootSlotId::A);
+            slots[staged_index].slot_state = BootSlotState::Invalid;
+            slots[staged_index].bootable = false;
+            slots[staged_index].trusted = false;
+            accepted.last_update_result = UpdateResultClass::Interrupted;
+            accepted.trusted_boot_state = TrustedBootState::ActiveTrusted;
+        }
+        UpdateTransferPhase::ActivationPending => {
+            accepted.recovery_required = true;
+            accepted.last_update_result = UpdateResultClass::Interrupted;
+            accepted.trusted_boot_state = TrustedBootState::RecoveryRequired;
+            recovery.reason = UpdateRecoveryReason::AmbiguousActivation;
+            recovery.last_trusted_slot = accepted.active_slot;
+            recovery.staged_slot = accepted.active_slot.other();
+            recovery.staged_slot_present = true;
+        }
+    }
 }
 
 #[must_use]

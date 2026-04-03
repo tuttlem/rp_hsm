@@ -1,11 +1,13 @@
 use std::thread;
 use std::time::Duration;
 
+use ed25519_dalek::Signer;
 use protocol::protocol::{
     HEADER_LEN, MessageKind, PROTOCOL_VERSION, ProtocolFrame, StatusCode,
     decode_frame, developer_reset_marker, encode_frame, finalize_marker, reactivate_marker,
     recovery_marker, revoke_marker, unlock_marker, zeroize_marker,
 };
+use sha2::{Digest, Sha256};
 
 use crate::cli::output::CliError;
 
@@ -13,6 +15,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 1_000;
 const FLASH_SETTLE_MS: u64 = 200;
 const READ_RETRY_ATTEMPTS: usize = 20;
 const READ_RETRY_DELAY_MS: u64 = 150;
+const UPDATE_TRUST_ANCHOR_SEED: [u8; 32] = *b"rp_hsm_update_anchor_seed_v1____";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -77,6 +80,7 @@ pub struct StatusReport {
     pub key_store_status: [u8; 5],
     pub session_status: [u8; 6],
     pub crypto_capabilities: Option<[u8; 10]>,
+    pub firmware_update_status: Option<[u8; 25]>,
     pub policy_profile: Option<[u8; 9]>,
     pub health_status: Option<[u8; 13]>,
 }
@@ -108,6 +112,34 @@ pub struct ProvisionResult {
     pub revision_counter: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FirmwareVersionInput {
+    pub security_epoch: u16,
+    pub major: u16,
+    pub minor: u16,
+    pub patch: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FirmwareUpdateBegin {
+    pub target_slot: u8,
+    pub update_session_id: u32,
+    pub expected_size: u32,
+    pub policy_revision: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FirmwareUpdateProgress {
+    pub bytes_received: u32,
+    pub remaining_bytes: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FirmwareUpdateActivation {
+    pub next_boot_slot: u8,
+    pub reboot_required: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyListRecord {
     pub key_id: u8,
@@ -130,6 +162,8 @@ pub enum DeveloperFaultAction {
     RollbackPersistedStore = 0x02,
     CorruptPersistedAudit = 0x03,
     RollbackPersistedAudit = 0x04,
+    AmbiguousFirmwareActivation = 0x05,
+    RollbackFirmwareVersion = 0x06,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,8 +181,40 @@ impl DeveloperFaultAction {
             "rollback-persisted-store" | "rollback" => Ok(Self::RollbackPersistedStore),
             "corrupt-persisted-audit" | "corrupt-audit" => Ok(Self::CorruptPersistedAudit),
             "rollback-persisted-audit" | "rollback-audit" => Ok(Self::RollbackPersistedAudit),
+            "ambiguous-firmware-activation" | "ambiguous-update" => {
+                Ok(Self::AmbiguousFirmwareActivation)
+            }
+            "rollback-firmware-version" | "rollback-update" => Ok(Self::RollbackFirmwareVersion),
             _ => Err(CliError::usage("invalid developer store fault action")),
         }
+    }
+}
+
+impl FirmwareVersionInput {
+    /// # Errors
+    ///
+    /// Returns `CliError` when the version string is not `EPOCH.MAJOR.MINOR.PATCH`.
+    pub fn parse(value: &str) -> Result<Self, CliError> {
+        let parts: Vec<&str> = value.split('.').collect();
+        if parts.len() != 4 {
+            return Err(CliError::usage(
+                "version must be EPOCH.MAJOR.MINOR.PATCH",
+            ));
+        }
+        Ok(Self {
+            security_epoch: parts[0]
+                .parse::<u16>()
+                .map_err(|_| CliError::usage("invalid security epoch"))?,
+            major: parts[1]
+                .parse::<u16>()
+                .map_err(|_| CliError::usage("invalid major version"))?,
+            minor: parts[2]
+                .parse::<u16>()
+                .map_err(|_| CliError::usage("invalid minor version"))?,
+            patch: parts[3]
+                .parse::<u16>()
+                .map_err(|_| CliError::usage("invalid patch version"))?,
+        })
     }
 }
 
@@ -169,6 +235,53 @@ impl VerifyAlgorithm {
             _ => Err(CliError::usage("invalid verify algorithm")),
         }
     }
+}
+
+fn build_authorized_request(
+    session_id: [u8; 4],
+    counter: u32,
+    code: u8,
+    inner: &[u8],
+) -> ProtocolFrame {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&session_id);
+    payload.extend_from_slice(&counter.to_le_bytes());
+    payload.extend_from_slice(inner);
+    ProtocolFrame::new(MessageKind::Request, code, 0x02, &payload).unwrap_or_default()
+}
+
+fn encode_manifest_payload(
+    version: FirmwareVersionInput,
+    image: &[u8],
+    target_slot: u8,
+) -> Result<Vec<u8>, CliError> {
+    let digest = Sha256::digest(image);
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&UPDATE_TRUST_ANCHOR_SEED);
+    let mut message = Vec::new();
+    message.push(1);
+    message.extend_from_slice(&version.security_epoch.to_le_bytes());
+    message.extend_from_slice(&version.major.to_le_bytes());
+    message.extend_from_slice(&version.minor.to_le_bytes());
+    message.extend_from_slice(&version.patch.to_le_bytes());
+    message.extend_from_slice(
+        &u32::try_from(image.len())
+            .map_err(|_| CliError::usage("image is too large"))?
+            .to_le_bytes(),
+    );
+    message.extend_from_slice(digest.as_slice());
+    message.push(target_slot);
+    message.extend_from_slice(&0u16.to_le_bytes());
+    let signature = signing_key.sign(&message);
+
+    let mut payload = message;
+    payload.push(0x01);
+    payload.extend_from_slice(
+        &u16::try_from(signature.to_bytes().len())
+            .map_err(|_| CliError::usage("signature is too large"))?
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(&signature.to_bytes());
+    Ok(payload)
 }
 
 pub struct SerialBackend {
@@ -249,6 +362,23 @@ impl SerialBackend {
                 crypto.code
             )));
         };
+        let update_request = build_authorized_request([0; 4], 1, 0x98, &[]);
+        let update = exchange_frame(&mut *port, &update_request)?;
+        let firmware_update_status = if update.code == StatusCode::Success.as_u8() {
+            Some(copy_array::<25>(update.payload.as_slice())?)
+        } else if matches!(
+            update.code,
+            x if x == StatusCode::CommandError.as_u8()
+                || x == StatusCode::AuthorizationError.as_u8()
+                || x == StatusCode::StateError.as_u8()
+        ) {
+            None
+        } else {
+            return Err(CliError::invalid_response(format!(
+                "unexpected firmware update status {:02x}",
+                update.code
+            )));
+        };
         let policy_request =
             ProtocolFrame::new(MessageKind::Request, 0x97, 0x00, &[]).unwrap_or_default();
         let policy = exchange_frame(&mut *port, &policy_request)?;
@@ -285,6 +415,7 @@ impl SerialBackend {
             key_store_status: copy_array::<5>(key_store.payload.as_slice())?,
             session_status: copy_array::<6>(session.payload.as_slice())?,
             crypto_capabilities,
+            firmware_update_status,
             policy_profile,
             health_status,
         })
@@ -447,6 +578,18 @@ impl SerialBackend {
     /// # Errors
     ///
     /// Returns `CliError` when the connected firmware rejects the developer
+    /// update fault injection request.
+    pub fn developer_update_fault(&self, action: DeveloperFaultAction) -> Result<(), CliError> {
+        let mut port = open_port(&self.config)?;
+        let request =
+            ProtocolFrame::new(MessageKind::Request, 0x9f, 0x02, &[action as u8]).unwrap_or_default();
+        let response = exchange_frame(&mut *port, &request)?;
+        ensure_status(&response, StatusCode::Success)
+    }
+
+    /// # Errors
+    ///
+    /// Returns `CliError` when the connected firmware rejects the developer
     /// policy request.
     pub fn developer_set_policy(
         &self,
@@ -483,6 +626,139 @@ impl SerialBackend {
             return Err(CliError::invalid_response("unexpected random payload shape"));
         }
         Ok(response.payload[1..].to_vec())
+    }
+
+    /// # Errors
+    ///
+    /// Returns `CliError` when authorization or update status retrieval fails.
+    pub fn get_firmware_update_status(
+        &self,
+        role: Role,
+        proof: &[u8],
+    ) -> Result<[u8; 25], CliError> {
+        let mut port = open_port(&self.config)?;
+        let mut session = authenticate_on_port(&mut *port, role, proof)?;
+        let response = exchange_authorized(&mut *port, &mut session, 0x98, 0x02, &[])?;
+        ensure_status(&response, StatusCode::Success)?;
+        copy_array::<25>(response.payload.as_slice())
+    }
+
+    /// # Errors
+    ///
+    /// Returns `CliError` when update authorization, transfer, finalize, or activation fails.
+    pub fn apply_firmware_update(
+        &self,
+        proof: &[u8],
+        version: FirmwareVersionInput,
+        image: &[u8],
+    ) -> Result<(FirmwareUpdateBegin, FirmwareUpdateActivation), CliError> {
+        if image.is_empty() || image.len() > 1024 {
+            return Err(CliError::usage("image must be between 1 and 1024 bytes"));
+        }
+        let mut port = open_port(&self.config)?;
+        let mut session = authenticate_on_port(&mut *port, Role::Administrator, proof)?;
+        let active_status = self.get_firmware_update_status(Role::Administrator, proof)?;
+        let active_slot = active_status[0];
+        let target_slot = if active_slot == 0x01 { 0x02 } else { 0x01 };
+        let manifest_payload = encode_manifest_payload(version, image, target_slot)?;
+        let begin = exchange_authorized(&mut *port, &mut session, 0x99, 0x02, &manifest_payload)?;
+        ensure_status(&begin, StatusCode::Success)?;
+        let begin_payload = copy_array::<13>(begin.payload.as_slice())?;
+        let begin_result = FirmwareUpdateBegin {
+            target_slot: begin_payload[0],
+            update_session_id: u32::from_le_bytes([
+                begin_payload[1],
+                begin_payload[2],
+                begin_payload[3],
+                begin_payload[4],
+            ]),
+            expected_size: u32::from_le_bytes([
+                begin_payload[5],
+                begin_payload[6],
+                begin_payload[7],
+                begin_payload[8],
+            ]),
+            policy_revision: u32::from_le_bytes([
+                begin_payload[9],
+                begin_payload[10],
+                begin_payload[11],
+                begin_payload[12],
+            ]),
+        };
+        for (index, chunk) in image.chunks(128).enumerate() {
+            let offset = u32::try_from(index * 128).map_err(|_| CliError::usage("image offset overflow"))?;
+            let mut inner = Vec::new();
+            inner.extend_from_slice(&begin_result.update_session_id.to_le_bytes());
+            inner.extend_from_slice(&offset.to_le_bytes());
+            inner.extend_from_slice(
+                &u16::try_from(chunk.len())
+                    .map_err(|_| CliError::usage("chunk too large"))?
+                    .to_le_bytes(),
+            );
+            inner.extend_from_slice(chunk);
+            let response = exchange_authorized(&mut *port, &mut session, 0x9a, 0x02, &inner)?;
+            ensure_status(&response, StatusCode::Success)?;
+            let _ = copy_array::<8>(response.payload.as_slice())?;
+        }
+        let mut finalize_inner = Vec::new();
+        finalize_inner.extend_from_slice(&begin_result.update_session_id.to_le_bytes());
+        finalize_inner.push(finalize_marker());
+        let finalize = exchange_authorized(&mut *port, &mut session, 0x9b, 0x02, &finalize_inner)?;
+        ensure_status(&finalize, StatusCode::Success)?;
+        let _ = copy_array::<10>(finalize.payload.as_slice())?;
+        let mut activate_inner = Vec::new();
+        activate_inner.extend_from_slice(&begin_result.update_session_id.to_le_bytes());
+        activate_inner.push(reactivate_marker());
+        let activate = exchange_authorized(&mut *port, &mut session, 0x9c, 0x02, &activate_inner)?;
+        ensure_status(&activate, StatusCode::Success)?;
+        settle_after_flash_mutation();
+        let payload = copy_array::<10>(activate.payload.as_slice())?;
+        Ok((
+            begin_result,
+            FirmwareUpdateActivation {
+                next_boot_slot: payload[0],
+                reboot_required: payload[9] != 0,
+            },
+        ))
+    }
+
+    /// # Errors
+    ///
+    /// Returns `CliError` when update abort fails.
+    pub fn abort_firmware_update(
+        &self,
+        proof: &[u8],
+        update_session_id: u32,
+    ) -> Result<[u8; 2], CliError> {
+        let mut port = open_port(&self.config)?;
+        let mut session = authenticate_on_port(&mut *port, Role::Administrator, proof)?;
+        let response = exchange_authorized(
+            &mut *port,
+            &mut session,
+            0x9d,
+            0x02,
+            &update_session_id.to_le_bytes(),
+        )?;
+        ensure_status(&response, StatusCode::Success)?;
+        copy_array::<2>(response.payload.as_slice())
+    }
+
+    /// # Errors
+    ///
+    /// Returns `CliError` when trusted recovery fails.
+    pub fn recover_trusted_firmware(&self, proof: &[u8]) -> Result<[u8; 10], CliError> {
+        let mut port = open_port(&self.config)?;
+        let mut session = authenticate_on_port(&mut *port, Role::Recovery, proof)?;
+        let response = exchange_authorized(
+            &mut *port,
+            &mut session,
+            0x9e,
+            0x02,
+            &[recovery_marker()],
+        )?;
+        ensure_status(&response, StatusCode::Success)?;
+        settle_after_flash_mutation();
+        copy_array::<10>(response.payload.as_slice())
     }
 
     /// # Errors

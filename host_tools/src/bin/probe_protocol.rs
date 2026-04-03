@@ -6,11 +6,13 @@ use chacha20poly1305::{
     ChaCha20Poly1305, KeyInit,
     aead::{AeadInPlace, generic_array::GenericArray},
 };
+use ed25519_dalek::Signer;
 use protocol::protocol::{
     FLAG_INCLUDE_RESTRICTED, KeyAlgorithm, MessageKind, PROTOCOL_VERSION, ProtocolFrame,
     StatusCode, USAGE_WRAP_IMPORT, developer_reset_marker, ed25519_public_key_from_seed,
-    encode_frame, finalize_marker, unlock_marker, zeroize_marker,
+    encode_frame, finalize_marker, reactivate_marker, unlock_marker, zeroize_marker,
 };
+use sha2::{Digest, Sha256};
 
 const DEFAULT_BAUD: u32 = 115_200;
 const DEFAULT_TIMEOUT_MS: u64 = 1_000;
@@ -21,6 +23,8 @@ const READ_RETRY_ATTEMPTS: usize = 20;
 const READ_RETRY_DELAY_MS: u64 = 150;
 const ED25519_SEED: [u8; 32] = *b"0123456789abcdef0123456789abcdef";
 const WRAP_KEY: [u8; 32] = *b"wrap-key-material-for-hsm-test!!";
+const UPDATE_TRUST_ANCHOR_SEED: [u8; 32] = *b"rp_hsm_update_anchor_seed_v1____";
+const UPDATE_IMAGE_V1_0_0_1: [u8; 96] = [0x5a; 96];
 
 type DynError = Box<dyn std::error::Error>;
 
@@ -30,6 +34,7 @@ struct ProbeConfig {
     baud: u32,
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<(), DynError> {
     let config = parse_args()?;
     let mut port = open_port(&config)?;
@@ -45,9 +50,37 @@ fn main() -> Result<(), DynError> {
     let transition_id = begin_provisioning(&mut *port, bootstrap, 2)?;
     finalize_provisioning(&mut *port, bootstrap, 3, transition_id)?;
     probe_lifecycle_status(&mut *port, &[0x03, 0x01, 0x00, 0x00])?;
-    probe_health_status(&mut *port, &[0x03, 0x01, 0x05])?;
+    probe_health_status(&mut *port, &[0x03, 0x01, 0x02])?;
 
     let admin = authenticate(&mut *port, "Administrator", 0x03, b"ADMIN")?;
+    probe_firmware_update_status(
+        &mut *port,
+        admin,
+        2,
+        [0x01, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x01, 0x00, 0x00],
+    )?;
+    apply_firmware_update(
+        &mut *port,
+        admin,
+        3,
+        FirmwareVersionTuple::new(1, 0, 0, 1),
+        &UPDATE_IMAGE_V1_0_0_1,
+    )?;
+    let admin = authenticate(&mut *port, "AdministratorPostUpdate", 0x03, b"ADMIN")?;
+    probe_firmware_update_status(
+        &mut *port,
+        admin,
+        2,
+        [0x02, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0x00, 0x01, 0x00, 0x04],
+    )?;
+    rollback_update_denied(
+        &mut *port,
+        admin,
+        3,
+        FirmwareVersionTuple::new(1, 0, 0, 1),
+        &UPDATE_IMAGE_V1_0_0_1,
+    )?;
+    let admin = authenticate(&mut *port, "AdministratorPostUpdateLifecycle", 0x03, b"ADMIN")?;
     lock_device(&mut *port, admin, 2)?;
     expect_session_inactive(&mut *port)?;
     let admin = authenticate(&mut *port, "AdministratorLocked", 0x03, b"ADMIN")?;
@@ -78,6 +111,7 @@ fn main() -> Result<(), DynError> {
     replay_list_denied(&mut *port, key_manager, 2)?;
     invalidate_session(&mut *port, key_manager, 3)?;
     expect_session_inactive(&mut *port)?;
+    let admin = authenticate(&mut *port, "AdministratorAudit", 0x03, b"ADMIN")?;
     retrieve_audit_page(&mut *port, admin, 3)?;
 
     set_dual_control(&mut *port, true)?;
@@ -121,13 +155,54 @@ fn main() -> Result<(), DynError> {
 
     let mut port = reopen_after_reboot(&config)?;
     expect_session_inactive(&mut *port)?;
+    let admin = authenticate(&mut *port, "AdministratorUpdateFault", 0x03, b"ADMIN")?;
+    let _ = admin;
+    inject_update_fault(&mut *port, 0x05)?;
+    developer_reboot(&mut *port)?;
+    drop(port);
+
+    let mut port = reopen_after_reboot(&config)?;
+    probe_health_status(&mut *port, &[0x05, 0x01, 0x05])?;
+    let recovery_session = authenticate(&mut *port, "RecoveryUpdateStatus", 0x04, b"RECVR")?;
+    let recovery_status = exchange(
+        &mut *port,
+        "GetFirmwareUpdateStatusRecovery",
+        &request(0x98, 0x02, &authorized_payload(recovery_session, 2, &[])),
+    )?;
+    expect_status(&recovery_status, StatusCode::Success)?;
+    if recovery_status.payload.len() != 25 || recovery_status.payload[19] != 1 || recovery_status.payload[20] != 0x08 {
+        return Err(format!(
+            "unexpected recovery update status payload: {}",
+            hex(recovery_status.payload.as_slice())
+        )
+        .into());
+    }
+    let recovery = authenticate(&mut *port, "RecoveryTrustedFirmware", 0x04, b"RECVR")?;
+    recover_trusted_firmware(&mut *port, recovery, 2)?;
+    probe_health_status(&mut *port, &[0x03, 0x01, 0x05])?;
     let _port = reset_to_factory(&config, port)?;
 
-    println!(
-        "All developer-mode authentication, session, crypto, and audit probes passed on {}",
-        config.port_name
-    );
+    println!("All developer-mode authentication, session, crypto, audit, and update probes passed on {}", config.port_name);
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct FirmwareVersionTuple {
+    security_epoch: u16,
+    major: u16,
+    minor: u16,
+    patch: u16,
+}
+
+impl FirmwareVersionTuple {
+    const fn new(security_epoch: u16, major: u16, minor: u16, patch: u16) -> Self {
+        Self {
+            security_epoch,
+            major,
+            minor,
+            patch,
+        }
+    }
 }
 
 fn parse_args() -> Result<ProbeConfig, DynError> {
@@ -186,13 +261,6 @@ fn ensure_factory_baseline(
 ) -> Result<Box<dyn serialport::SerialPort>, DynError> {
     let response = exchange(&mut *port, "GetDeviceStatus", &request(0x02, 0x00, &[0x00]))?;
     expect_status(&response, StatusCode::Success)?;
-    if response.payload.len() == 2 && response.payload[1] != 0x05 {
-        return Err(format!(
-            "device booted with active non-developer session {}; reflash or reboot into a clean developer-mode baseline before probing",
-            hex(response.payload.as_slice())
-        )
-        .into());
-    }
     if response.payload.as_slice() != [0x01, 0x05] {
         port = reset_to_factory(config, port)?;
     }
@@ -227,7 +295,7 @@ fn probe_public_catalog(port: &mut dyn serialport::SerialPort) -> Result<(), Dyn
     expect_payload(
         &response,
         StatusCode::Success,
-        &[0x0a, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0a, 0x0b],
+        &[0x0b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0a, 0x0b, 0x0c],
     )?;
     let restricted = exchange(
         port,
@@ -237,8 +305,198 @@ fn probe_public_catalog(port: &mut dyn serialport::SerialPort) -> Result<(), Dyn
     expect_payload(
         &restricted,
         StatusCode::Success,
-        &[0x0e, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0a, 0x0b, 0x88, 0x8e, 0x8f, 0x97],
+        &[
+            0x18, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0a, 0x0b, 0x0c, 0x0d, 0x98,
+            0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x88, 0x8e, 0x8f, 0x97, 0x9f,
+        ],
     )
+}
+
+fn probe_firmware_update_status(
+    port: &mut dyn serialport::SerialPort,
+    session_id: [u8; 4],
+    counter: u32,
+    expected_prefix: [u8; 21],
+) -> Result<(), DynError> {
+    let response = exchange(
+        port,
+        "GetFirmwareUpdateStatus",
+        &request(0x98, 0x02, &authorized_payload(session_id, counter, &[])),
+    )?;
+    expect_status(&response, StatusCode::Success)?;
+    if response.payload.len() != 25 {
+        return Err(format!("unexpected firmware update payload length {}", response.payload.len()).into());
+    }
+    if response.payload.as_slice()[0..21] != expected_prefix {
+        return Err(format!(
+            "unexpected firmware update status prefix: expected {}, got {}",
+            hex(&expected_prefix),
+            hex(&response.payload.as_slice()[0..21])
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn apply_firmware_update(
+    port: &mut dyn serialport::SerialPort,
+    session_id: [u8; 4],
+    start_counter: u32,
+    version: FirmwareVersionTuple,
+    image: &[u8],
+) -> Result<(), DynError> {
+    let active_status = exchange(
+        port,
+        "GetFirmwareUpdateStatusBeforeApply",
+        &request(0x98, 0x02, &authorized_payload(session_id, start_counter, &[])),
+    )?;
+    expect_status(&active_status, StatusCode::Success)?;
+    let target_slot = if active_status.payload.first() == Some(&0x01) { 0x02 } else { 0x01 };
+    let manifest = encode_update_manifest(version, image, target_slot)?;
+    let begin = exchange(
+        port,
+        "BeginFirmwareUpdate",
+        &request(0x99, 0x02, &authorized_payload(session_id, start_counter + 1, &manifest)),
+    )?;
+    expect_status(&begin, StatusCode::Success)?;
+    if begin.payload.len() != 13 {
+        return Err("unexpected begin update payload shape".into());
+    }
+    let update_session_id = u32::from_le_bytes([
+        begin.payload[1],
+        begin.payload[2],
+        begin.payload[3],
+        begin.payload[4],
+    ]);
+    let mut bytes_received = 0u32;
+    for (index, chunk) in image.chunks(64).enumerate() {
+        let offset = u32::try_from(index * 64)?;
+        let mut inner = Vec::new();
+        inner.extend_from_slice(&update_session_id.to_le_bytes());
+        inner.extend_from_slice(&offset.to_le_bytes());
+        inner.extend_from_slice(&u16::try_from(chunk.len())?.to_le_bytes());
+        inner.extend_from_slice(chunk);
+        let response = exchange(
+            port,
+            &format!("TransferFirmwareChunk{}", index + 1),
+            &request(
+                0x9a,
+                0x02,
+                &authorized_payload(session_id, start_counter + 2 + u32::try_from(index)?, &inner),
+            ),
+        )?;
+        expect_status(&response, StatusCode::Success)?;
+        bytes_received = bytes_received.saturating_add(u32::try_from(chunk.len())?);
+        let expected_remaining = u32::try_from(image.len())?.saturating_sub(bytes_received);
+        let expected_progress = [
+            bytes_received.to_le_bytes()[0],
+            bytes_received.to_le_bytes()[1],
+            bytes_received.to_le_bytes()[2],
+            bytes_received.to_le_bytes()[3],
+            expected_remaining.to_le_bytes()[0],
+            expected_remaining.to_le_bytes()[1],
+            expected_remaining.to_le_bytes()[2],
+            expected_remaining.to_le_bytes()[3],
+        ];
+        expect_payload(&response, StatusCode::Success, &expected_progress)?;
+    }
+    let transfer_counter = start_counter + 2 + u32::try_from(image.chunks(64).count())?;
+    let mut finalize = Vec::new();
+    finalize.extend_from_slice(&update_session_id.to_le_bytes());
+    finalize.push(finalize_marker());
+    let finalize_response = exchange(
+        port,
+        "FinalizeFirmwareUpdate",
+        &request(0x9b, 0x02, &authorized_payload(session_id, transfer_counter, &finalize)),
+    )?;
+    expect_status(&finalize_response, StatusCode::Success)?;
+    let mut activate = Vec::new();
+    activate.extend_from_slice(&update_session_id.to_le_bytes());
+    activate.push(reactivate_marker());
+    let activate_response = exchange(
+        port,
+        "ActivateFirmwareUpdate",
+        &request(0x9c, 0x02, &authorized_payload(session_id, transfer_counter + 1, &activate)),
+    )?;
+    expect_status(&activate_response, StatusCode::Success)?;
+    settle_after_flash_mutation();
+    Ok(())
+}
+
+fn rollback_update_denied(
+    port: &mut dyn serialport::SerialPort,
+    session_id: [u8; 4],
+    counter: u32,
+    version: FirmwareVersionTuple,
+    image: &[u8],
+) -> Result<(), DynError> {
+    let manifest = encode_update_manifest(version, image, 0x01)?;
+    let response = exchange(
+        port,
+        "BeginFirmwareUpdateRollbackDenied",
+        &request(0x99, 0x02, &authorized_payload(session_id, counter, &manifest)),
+    )?;
+    expect_status(&response, StatusCode::AuthorizationError)?;
+    if response.payload.as_slice() != [0x04] {
+        return Err(format!(
+            "unexpected rollback denial payload: {}",
+            hex(response.payload.as_slice())
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn recover_trusted_firmware(
+    port: &mut dyn serialport::SerialPort,
+    session_id: [u8; 4],
+    counter: u32,
+) -> Result<(), DynError> {
+    let response = exchange(
+        port,
+        "RecoverTrustedFirmware",
+        &request(0x9e, 0x02, &authorized_payload(session_id, counter, &[0xc3])),
+    )?;
+    expect_status(&response, StatusCode::Success)?;
+    settle_after_flash_mutation();
+    Ok(())
+}
+
+fn inject_update_fault(port: &mut dyn serialport::SerialPort, action: u8) -> Result<(), DynError> {
+    let response = exchange(
+        port,
+        "DeveloperUpdateFault",
+        &request(0x9f, 0x02, &[action]),
+    )?;
+    expect_status(&response, StatusCode::Success)?;
+    settle_after_flash_mutation();
+    Ok(())
+}
+
+fn encode_update_manifest(
+    version: FirmwareVersionTuple,
+    image: &[u8],
+    target_slot: u8,
+) -> Result<Vec<u8>, DynError> {
+    let digest = Sha256::digest(image);
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&UPDATE_TRUST_ANCHOR_SEED);
+    let mut message = Vec::new();
+    message.push(1);
+    message.extend_from_slice(&version.security_epoch.to_le_bytes());
+    message.extend_from_slice(&version.major.to_le_bytes());
+    message.extend_from_slice(&version.minor.to_le_bytes());
+    message.extend_from_slice(&version.patch.to_le_bytes());
+    message.extend_from_slice(&u32::try_from(image.len())?.to_le_bytes());
+    message.extend_from_slice(digest.as_slice());
+    message.push(target_slot);
+    message.extend_from_slice(&0u16.to_le_bytes());
+    let signature = signing_key.sign(&message).to_bytes();
+
+    let mut payload = message;
+    payload.push(0x01);
+    payload.extend_from_slice(&u16::try_from(signature.len())?.to_le_bytes());
+    payload.extend_from_slice(&signature);
+    Ok(payload)
 }
 
 fn probe_crypto_capabilities(port: &mut dyn serialport::SerialPort) -> Result<(), DynError> {

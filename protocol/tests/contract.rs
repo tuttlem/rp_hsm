@@ -40,3 +40,9 @@ mod audit_event_vectors;
 mod health_status_vectors;
 #[path = "contract/audit_retention_vectors.rs"]
 mod audit_retention_vectors;
+#[path = "contract/firmware_update_vectors.rs"]
+mod firmware_update_vectors;
+#[path = "contract/firmware_version_policy_vectors.rs"]
+mod firmware_version_policy_vectors;
+#[path = "contract/update_recovery_vectors.rs"]
+mod update_recovery_vectors;

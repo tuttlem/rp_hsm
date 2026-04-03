@@ -1,7 +1,7 @@
 use crate::cli::args::{AuthOptions, CommandSpec, ParsedArgs};
 use crate::cli::device::{DiscoveredDevice, discover_devices, resolve_device_selector};
 use crate::cli::output::{CliError, CommandOutput, audit_page_lines, lines_output};
-use crate::client::{KeyListRecord, SerialBackend, SessionContext, StatusReport};
+use crate::client::{FirmwareVersionInput, KeyListRecord, SerialBackend, SessionContext, StatusReport};
 use std::io::Read;
 
 /// # Errors
@@ -26,6 +26,64 @@ pub fn execute(parsed: ParsedArgs) -> Result<CommandOutput, CliError> {
             let report = SerialBackend::new(crate::client::ClientConfig::new(selected, parsed.global.baud))
                 .status_report()?;
             Ok(lines_output(&format_status(&report)))
+        }
+        CommandSpec::UpdateStatus { auth } => {
+            let proof = load_proof(&auth)?;
+            let devices = discover_devices(parsed.global.baud)?;
+            let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
+            let payload = SerialBackend::new(crate::client::ClientConfig::new(selected.clone(), parsed.global.baud))
+                .get_firmware_update_status(auth.role, &proof)?;
+            Ok(lines_output(&format_update_status(&selected, payload)))
+        }
+        CommandSpec::ApplyUpdate { image_path, version, auth } => {
+            let proof = load_proof(&auth)?;
+            let image = std::fs::read(&image_path)
+                .map_err(|err| CliError::invalid_response(format!("failed to read image: {err}")))?;
+            let version = FirmwareVersionInput::parse(&version)?;
+            let devices = discover_devices(parsed.global.baud)?;
+            let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
+            let (begin, activation) = SerialBackend::new(crate::client::ClientConfig::new(selected.clone(), parsed.global.baud))
+                .apply_firmware_update(&proof, version, &image)?;
+            Ok(lines_output(&[
+                format!("device={selected}"),
+                format!("target_slot={}", boot_slot_name(begin.target_slot)),
+                format!("update_session_id={}", begin.update_session_id),
+                format!("expected_size={}", begin.expected_size),
+                format!("policy_revision={}", begin.policy_revision),
+                format!("next_boot_slot={}", boot_slot_name(activation.next_boot_slot)),
+                format!("reboot_required={}", yes_no(activation.reboot_required)),
+            ]))
+        }
+        CommandSpec::AbortUpdate { session_id, auth } => {
+            let proof = load_proof(&auth)?;
+            let devices = discover_devices(parsed.global.baud)?;
+            let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
+            let result = SerialBackend::new(crate::client::ClientConfig::new(selected.clone(), parsed.global.baud))
+                .abort_firmware_update(&proof, session_id)?;
+            Ok(lines_output(&[
+                format!("device={selected}"),
+                format!("transfer_state_cleared={}", yes_no(result[0] != 0)),
+                format!("staged_slot_invalidated={}", yes_no(result[1] != 0)),
+            ]))
+        }
+        CommandSpec::RecoverTrustedFirmware { auth } => {
+            let proof = load_proof(&auth)?;
+            let devices = discover_devices(parsed.global.baud)?;
+            let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
+            let result = SerialBackend::new(crate::client::ClientConfig::new(selected.clone(), parsed.global.baud))
+                .recover_trusted_firmware(&proof)?;
+            Ok(lines_output(&[
+                format!("device={selected}"),
+                format!("restored_slot={}", boot_slot_name(result[0])),
+                format!(
+                    "restored_version={}.{}.{}.{}",
+                    u16::from_le_bytes([result[1], result[2]]),
+                    u16::from_le_bytes([result[3], result[4]]),
+                    u16::from_le_bytes([result[5], result[6]]),
+                    u16::from_le_bytes([result[7], result[8]])
+                ),
+                format!("recovery_required={}", yes_no(result[9] != 0)),
+            ]))
         }
         CommandSpec::DeveloperReset => {
             let devices = discover_devices(parsed.global.baud)?;
@@ -55,6 +113,16 @@ pub fn execute(parsed: ParsedArgs) -> Result<CommandOutput, CliError> {
             let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
             SerialBackend::new(crate::client::ClientConfig::new(selected.clone(), parsed.global.baud))
                 .developer_store_fault(action)?;
+            Ok(lines_output(&[
+                format!("device={selected}"),
+                format!("action={}", developer_fault_name(action)),
+            ]))
+        }
+        CommandSpec::DeveloperUpdateFault { action } => {
+            let devices = discover_devices(parsed.global.baud)?;
+            let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
+            SerialBackend::new(crate::client::ClientConfig::new(selected.clone(), parsed.global.baud))
+                .developer_update_fault(action)?;
             Ok(lines_output(&[
                 format!("device={selected}"),
                 format!("action={}", developer_fault_name(action)),
@@ -383,6 +451,31 @@ fn format_status(report: &StatusReport) -> Vec<String> {
         lines.push(format!("crypto_max_random_len={}", capabilities[8]));
         lines.push(format!("wrapped_import_enabled={}", yes_no(capabilities[9] != 0)));
     }
+    if let Some(update) = report.firmware_update_status {
+        lines.push(format!("firmware_active_slot={}", boot_slot_name(update[0])));
+        lines.push(format!(
+            "firmware_active_version={}.{}.{}.{}",
+            u16::from_le_bytes([update[1], update[2]]),
+            u16::from_le_bytes([update[3], update[4]]),
+            u16::from_le_bytes([update[5], update[6]]),
+            u16::from_le_bytes([update[7], update[8]])
+        ));
+        lines.push(format!(
+            "firmware_minimum_version={}.{}.{}.{}",
+            u16::from_le_bytes([update[9], update[10]]),
+            u16::from_le_bytes([update[11], update[12]]),
+            u16::from_le_bytes([update[13], update[14]]),
+            u16::from_le_bytes([update[15], update[16]])
+        ));
+        lines.push(format!("firmware_transfer_phase={}", update_transfer_phase_name(update[17])));
+        lines.push(format!("firmware_staged_slot_state={}", boot_slot_state_name(update[18])));
+        lines.push(format!("firmware_recovery_required={}", yes_no(update[19] != 0)));
+        lines.push(format!("firmware_last_update_result={}", update_result_name(update[20])));
+        lines.push(format!(
+            "firmware_policy_revision={}",
+            u32::from_le_bytes([update[21], update[22], update[23], update[24]])
+        ));
+    }
     if let Some(policy) = report.policy_profile {
         lines.push(format!("policy_profile_version={}", policy[0]));
         lines.push(format!(
@@ -459,7 +552,38 @@ fn developer_fault_name(action: crate::client::DeveloperFaultAction) -> &'static
         crate::client::DeveloperFaultAction::RollbackPersistedStore => "rollback-persisted-store",
         crate::client::DeveloperFaultAction::CorruptPersistedAudit => "corrupt-persisted-audit",
         crate::client::DeveloperFaultAction::RollbackPersistedAudit => "rollback-persisted-audit",
+        crate::client::DeveloperFaultAction::AmbiguousFirmwareActivation => "ambiguous-firmware-activation",
+        crate::client::DeveloperFaultAction::RollbackFirmwareVersion => "rollback-firmware-version",
     }
+}
+
+fn format_update_status(device: &str, payload: [u8; 25]) -> Vec<String> {
+    vec![
+        format!("device={device}"),
+        format!("active_slot={}", boot_slot_name(payload[0])),
+        format!(
+            "active_version={}.{}.{}.{}",
+            u16::from_le_bytes([payload[1], payload[2]]),
+            u16::from_le_bytes([payload[3], payload[4]]),
+            u16::from_le_bytes([payload[5], payload[6]]),
+            u16::from_le_bytes([payload[7], payload[8]])
+        ),
+        format!(
+            "minimum_accepted_version={}.{}.{}.{}",
+            u16::from_le_bytes([payload[9], payload[10]]),
+            u16::from_le_bytes([payload[11], payload[12]]),
+            u16::from_le_bytes([payload[13], payload[14]]),
+            u16::from_le_bytes([payload[15], payload[16]])
+        ),
+        format!("transfer_phase={}", update_transfer_phase_name(payload[17])),
+        format!("staged_slot_state={}", boot_slot_state_name(payload[18])),
+        format!("recovery_required={}", yes_no(payload[19] != 0)),
+        format!("last_update_result={}", update_result_name(payload[20])),
+        format!(
+            "policy_revision={}",
+            u32::from_le_bytes([payload[21], payload[22], payload[23], payload[24]])
+        ),
+    ]
 }
 
 fn read_stdin_required() -> Result<Vec<u8>, CliError> {
@@ -526,6 +650,54 @@ fn role_name(value: u8) -> &'static str {
         0x04 => "recovery",
         0x05 => "developer",
         0x06 => "key-manager",
+        _ => "unknown",
+    }
+}
+
+fn boot_slot_name(value: u8) -> &'static str {
+    match value {
+        0x01 => "a",
+        0x02 => "b",
+        _ => "unknown",
+    }
+}
+
+fn boot_slot_state_name(value: u8) -> &'static str {
+    match value {
+        0x01 => "empty",
+        0x02 => "active-trusted",
+        0x03 => "staged-transfer",
+        0x04 => "staged-validated",
+        0x05 => "invalid",
+        _ => "unknown",
+    }
+}
+
+fn update_transfer_phase_name(value: u8) -> &'static str {
+    match value {
+        0x00 => "empty",
+        0x01 => "manifest-accepted",
+        0x02 => "transferring",
+        0x03 => "transferred",
+        0x04 => "validating",
+        0x05 => "activation-pending",
+        0x06 => "aborted",
+        _ => "unknown",
+    }
+}
+
+fn update_result_name(value: u8) -> &'static str {
+    match value {
+        0x00 => "none",
+        0x01 => "begun",
+        0x02 => "aborted",
+        0x03 => "finalized",
+        0x04 => "activated",
+        0x05 => "rollback-denied",
+        0x06 => "signature-rejected",
+        0x07 => "digest-mismatch",
+        0x08 => "interrupted",
+        0x09 => "recovered",
         _ => "unknown",
     }
 }
@@ -605,6 +777,7 @@ mod tests {
             key_store_status: [1, 0, 8, 0, 0],
             session_status: [0, 5, 0, 0, 0, 1],
             crypto_capabilities: Some([1, 0x0f, 1, 3, 0x80, 0x00, 0x40, 0x00, 0x40, 1]),
+            firmware_update_status: None,
             policy_profile: Some([1, 0x02, 0x00, 0x00, 0x00, 1, 0x07, 0x00, 1]),
             health_status: Some([1, 1, 5, 0x02, 0x00, 0x00, 0x00, 2, 0x04, 0x00, 0, 0, 0]),
         });

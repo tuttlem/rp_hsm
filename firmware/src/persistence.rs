@@ -3,14 +3,17 @@ use core::slice;
 use critical_section::with;
 use heapless::Vec;
 use protocol::protocol::{
-    ApprovalTargetBinding, ApprovalTicket, ApprovalTicketState, AuditEvent, AuditEventClass,
-    AuditEventCode, AuditResultClass, AuditStoreSnapshot, AuthSnapshot, AuthorityRole,
-    CredentialKind, CredentialRecord, CryptoPersistentState, DeveloperStoreFaultAction,
-    DeviceState, ExportPolicy, KeyAlgorithm, KeyLifecycleState, KeyMetadata, KeyOrigin,
-    KeyStoreRecord, KeyStoreSnapshot, MAX_APPROVAL_TICKETS, MAX_AUDIT_DETAIL_LEN,
-    MAX_AUDIT_EVENTS, MAX_KEY_JOURNAL_RECORDS, MAX_KEY_MATERIAL_LEN, POLICY_PROFILE_VERSION,
-    PolicyProfile, ProtectedActionClass, ProvisioningSnapshot, RecoveryPolicy, SessionState,
-    TransitionIntent, TransitionType,
+    AcceptedFirmwareState, ApprovalTargetBinding, ApprovalTicket, ApprovalTicketState,
+    AuditEvent, AuditEventClass, AuditEventCode, AuditResultClass, AuditStoreSnapshot,
+    AuthSnapshot, AuthorityRole, BootSlotId, BootSlotMetadata, BootSlotState, CredentialKind,
+    CredentialRecord, CryptoPersistentState, DeveloperStoreFaultAction, DeviceState, ExportPolicy,
+    FirmwarePackageManifest, FirmwareVersion, KeyAlgorithm, KeyLifecycleState, KeyMetadata,
+    KeyOrigin, KeyStoreRecord, KeyStoreSnapshot, MAX_APPROVAL_TICKETS, MAX_AUDIT_DETAIL_LEN,
+    MAX_AUDIT_EVENTS, MAX_FIRMWARE_IMAGE_SIZE, MAX_FIRMWARE_SIGNATURE_LEN,
+    MAX_KEY_JOURNAL_RECORDS, MAX_KEY_MATERIAL_LEN, POLICY_PROFILE_VERSION, PolicyProfile,
+    ProtectedActionClass, ProvisioningSnapshot, RecoveryPolicy, RecoveryState, SessionState,
+    TransitionIntent, TransitionType, TrustedBootState, UpdateRecoveryReason, UpdateResultClass,
+    UpdateTransferPhase, UpdateTransferState,
 };
 use protocol::protocol::state::{
     AuthorizationMode, FreshnessAnchor, KeyMaterialEnvelope, LifecycleState, MaterialEncoding,
@@ -21,8 +24,8 @@ use rp235x_hal as hal;
 const FLASH_XIP_BASE: usize = 0x1000_0000;
 const SLOT_SIZE: usize = 4096;
 const PAGE_SIZE: usize = 256;
-const MAGIC: [u8; 4] = *b"HSM3";
-const FORMAT_VERSION: u8 = 2;
+const MAGIC: [u8; 4] = *b"HSM4";
+const FORMAT_VERSION: u8 = 3;
 const HEADER_SIZE: usize = 20;
 const PAYLOAD_CAPACITY: usize = SLOT_SIZE - HEADER_SIZE;
 
@@ -37,6 +40,10 @@ pub struct PersistedState {
     pub audit: AuditStoreSnapshot,
     pub auth: AuthSnapshot,
     pub crypto: CryptoPersistentState,
+    pub accepted_firmware: AcceptedFirmwareState,
+    pub boot_slots: [BootSlotMetadata; 2],
+    pub update_transfer: UpdateTransferState,
+    pub recovery: RecoveryState,
     pub policy: PolicyProfile,
     pub approval_tickets: Vec<ApprovalTicket, MAX_APPROVAL_TICKETS>,
     pub next_approval_ticket_id: u32,
@@ -152,6 +159,21 @@ impl FlashStateStore {
                 state.audit.corruption_detected = true;
                 write_slot(target_slot, active.generation.saturating_add(1), &state)
             }
+            DeveloperStoreFaultAction::AmbiguousFirmwareActivation => {
+                let mut state = active.state.clone();
+                state.update_transfer.phase = UpdateTransferPhase::ActivationPending;
+                state.accepted_firmware.trusted_boot_state = TrustedBootState::RecoveryRequired;
+                state.accepted_firmware.recovery_required = true;
+                state.recovery.reason = UpdateRecoveryReason::AmbiguousActivation;
+                state.recovery.staged_slot_present = true;
+                write_slot(target_slot, active.generation.saturating_add(1), &state)
+            }
+            DeveloperStoreFaultAction::RollbackFirmwareVersion => {
+                let mut state = active.state.clone();
+                state.accepted_firmware.minimum_accepted_version.security_epoch =
+                    state.accepted_firmware.minimum_accepted_version.security_epoch.saturating_add(1);
+                write_slot(target_slot, active.generation.saturating_add(1), &state)
+            }
         }
     }
 
@@ -227,6 +249,19 @@ pub fn corrupted_recovery_state() -> PersistedState {
         },
         auth: AuthSnapshot::default(),
         crypto: CryptoPersistentState::default(),
+        accepted_firmware: AcceptedFirmwareState::default(),
+        boot_slots: [
+            BootSlotMetadata::new(BootSlotId::A, BootSlotState::ActiveTrusted),
+            BootSlotMetadata::new(BootSlotId::B, BootSlotState::Empty),
+        ],
+        update_transfer: UpdateTransferState::default(),
+        recovery: RecoveryState {
+            reason: UpdateRecoveryReason::MetadataCorrupted,
+            last_trusted_slot: BootSlotId::A,
+            staged_slot: BootSlotId::B,
+            staged_slot_present: false,
+            authorization_required: true,
+        },
         policy: PolicyProfile::default(),
         approval_tickets: Vec::new(),
         next_approval_ticket_id: 1,
@@ -357,6 +392,13 @@ fn encode_state(
     encode_audit_store(&state.audit, out)?;
     encode_auth_snapshot(&state.auth, out)?;
     encode_crypto_state(&state.crypto, out)?;
+    encode_update_state(
+        &state.accepted_firmware,
+        &state.boot_slots,
+        &state.update_transfer,
+        &state.recovery,
+        out,
+    )?;
     encode_policy_state(&state.policy, &state.approval_tickets, state.next_approval_ticket_id, out)
 }
 
@@ -491,6 +533,68 @@ fn encode_crypto_state(
     push_u32(out, snapshot.last_wrapped_import_revision)
 }
 
+fn encode_update_state(
+    accepted: &AcceptedFirmwareState,
+    boot_slots: &[BootSlotMetadata; 2],
+    transfer: &UpdateTransferState,
+    recovery: &RecoveryState,
+    out: &mut Vec<u8, PAYLOAD_CAPACITY>,
+) -> Result<(), PersistenceError> {
+    push_u8(out, accepted.active_slot as u8)?;
+    push_firmware_version(out, accepted.active_version)?;
+    push_firmware_version(out, accepted.minimum_accepted_version)?;
+    push_u8(out, accepted.trusted_boot_state as u8)?;
+    push_u8(out, accepted.last_update_result as u8)?;
+    push_u8(out, u8::from(accepted.recovery_required))?;
+    push_u32(out, accepted.revision_counter)?;
+    for slot in boot_slots {
+        push_u8(out, slot.slot_id as u8)?;
+        push_u8(out, slot.slot_state as u8)?;
+        push_u8(out, u8::from(slot.version_present))?;
+        push_firmware_version(out, slot.stored_version)?;
+        push_u8(out, u8::from(slot.digest_present))?;
+        out.extend_from_slice(&slot.stored_digest)
+            .map_err(|()| PersistenceError::EncodeOverflow)?;
+        push_u8(out, u8::from(slot.bootable))?;
+        push_u8(out, u8::from(slot.trusted))?;
+    }
+    push_u8(out, transfer.phase as u8)?;
+    push_u32(out, transfer.session_id)?;
+    match &transfer.manifest {
+        Some(manifest) => {
+            push_u8(out, 1)?;
+            encode_manifest(manifest, out)?;
+        }
+        None => push_u8(out, 0)?,
+    }
+    push_u32(out, transfer.bytes_received)?;
+    push_u32(out, transfer.expected_size)?;
+    push_vec(out, &transfer.staged_image)?;
+    push_u32(out, transfer.started_revision)?;
+    push_u32(out, transfer.policy_revision)?;
+    push_u8(out, recovery.reason as u8)?;
+    push_u8(out, recovery.last_trusted_slot as u8)?;
+    push_u8(out, recovery.staged_slot as u8)?;
+    push_u8(out, u8::from(recovery.staged_slot_present))?;
+    push_u8(out, u8::from(recovery.authorization_required))
+}
+
+fn encode_manifest(
+    manifest: &FirmwarePackageManifest,
+    out: &mut Vec<u8, PAYLOAD_CAPACITY>,
+) -> Result<(), PersistenceError> {
+    push_u8(out, manifest.manifest_version)?;
+    push_firmware_version(out, manifest.image_version)?;
+    push_u32(out, manifest.image_size_bytes)?;
+    out.extend_from_slice(&manifest.image_digest_sha256)
+        .map_err(|()| PersistenceError::EncodeOverflow)?;
+    push_u8(out, manifest.target_slot_hint as u8)?;
+    out.extend_from_slice(&manifest.policy_flags.to_le_bytes())
+        .map_err(|()| PersistenceError::EncodeOverflow)?;
+    push_u8(out, manifest.signature_algorithm)?;
+    push_vec(out, &manifest.signature_bytes)
+}
+
 fn encode_policy_state(
     profile: &PolicyProfile,
     tickets: &Vec<ApprovalTicket, MAX_APPROVAL_TICKETS>,
@@ -545,6 +649,20 @@ fn push_u32(out: &mut Vec<u8, PAYLOAD_CAPACITY>, value: u32) -> Result<(), Persi
         .map_err(|()| PersistenceError::EncodeOverflow)
 }
 
+fn push_firmware_version(
+    out: &mut Vec<u8, PAYLOAD_CAPACITY>,
+    version: FirmwareVersion,
+) -> Result<(), PersistenceError> {
+    out.extend_from_slice(&version.security_epoch.to_le_bytes())
+        .map_err(|()| PersistenceError::EncodeOverflow)?;
+    out.extend_from_slice(&version.major.to_le_bytes())
+        .map_err(|()| PersistenceError::EncodeOverflow)?;
+    out.extend_from_slice(&version.minor.to_le_bytes())
+        .map_err(|()| PersistenceError::EncodeOverflow)?;
+    out.extend_from_slice(&version.patch.to_le_bytes())
+        .map_err(|()| PersistenceError::EncodeOverflow)
+}
+
 fn push_vec<const N: usize>(
     out: &mut Vec<u8, PAYLOAD_CAPACITY>,
     bytes: &Vec<u8, N>,
@@ -564,6 +682,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, PersistenceError> {
     let audit = decode_audit_store(&mut cursor)?;
     let auth = decode_auth_snapshot(&mut cursor)?;
     let crypto = decode_crypto_state(&mut cursor)?;
+    let (accepted_firmware, boot_slots, update_transfer, recovery) = decode_update_state(&mut cursor)?;
     let (policy, approval_tickets, next_approval_ticket_id) = decode_policy_state(&mut cursor)?;
     if !cursor.is_at_end() {
         return Err(PersistenceError::DecodeFailure);
@@ -574,6 +693,10 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, PersistenceError> {
         audit,
         auth,
         crypto,
+        accepted_firmware,
+        boot_slots,
+        update_transfer,
+        recovery,
         policy,
         approval_tickets,
         next_approval_ticket_id,
@@ -786,6 +909,89 @@ fn decode_crypto_state(cursor: &mut Cursor<'_>) -> Result<CryptoPersistentState,
     })
 }
 
+fn decode_update_state(
+    cursor: &mut Cursor<'_>,
+) -> Result<
+    (
+        AcceptedFirmwareState,
+        [BootSlotMetadata; 2],
+        UpdateTransferState,
+        RecoveryState,
+    ),
+    PersistenceError,
+> {
+    let accepted = AcceptedFirmwareState {
+        active_slot: decode_boot_slot_id(cursor.read_u8()?)?,
+        active_version: read_firmware_version(cursor)?,
+        minimum_accepted_version: read_firmware_version(cursor)?,
+        trusted_boot_state: decode_trusted_boot_state(cursor.read_u8()?)?,
+        last_update_result: decode_update_result_class(cursor.read_u8()?)?,
+        recovery_required: cursor.read_u8()? != 0,
+        revision_counter: cursor.read_u32()?,
+    };
+    let slot0 = decode_boot_slot(cursor)?;
+    let slot1 = decode_boot_slot(cursor)?;
+    let transfer = UpdateTransferState {
+        phase: decode_update_transfer_phase(cursor.read_u8()?)?,
+        session_id: cursor.read_u32()?,
+        manifest: match cursor.read_u8()? {
+            0 => None,
+            1 => Some(decode_manifest(cursor)?),
+            _ => return Err(PersistenceError::DecodeFailure),
+        },
+        bytes_received: cursor.read_u32()?,
+        expected_size: cursor.read_u32()?,
+        staged_image: cursor.read_vec::<MAX_FIRMWARE_IMAGE_SIZE>()?,
+        started_revision: cursor.read_u32()?,
+        policy_revision: cursor.read_u32()?,
+    };
+    let recovery = RecoveryState {
+        reason: decode_update_recovery_reason(cursor.read_u8()?)?,
+        last_trusted_slot: decode_boot_slot_id(cursor.read_u8()?)?,
+        staged_slot: decode_boot_slot_id(cursor.read_u8()?)?,
+        staged_slot_present: cursor.read_u8()? != 0,
+        authorization_required: cursor.read_u8()? != 0,
+    };
+    Ok((accepted, [slot0, slot1], transfer, recovery))
+}
+
+fn decode_boot_slot(cursor: &mut Cursor<'_>) -> Result<BootSlotMetadata, PersistenceError> {
+    let slot_id = decode_boot_slot_id(cursor.read_u8()?)?;
+    let slot_state = decode_boot_slot_state(cursor.read_u8()?)?;
+    let version_present = cursor.read_u8()? != 0;
+    let stored_version = read_firmware_version(cursor)?;
+    let digest_present = cursor.read_u8()? != 0;
+    let mut stored_digest = [0u8; 32];
+    stored_digest.copy_from_slice(cursor.read_bytes(32)?);
+    Ok(BootSlotMetadata {
+        slot_id,
+        slot_state,
+        stored_version,
+        version_present,
+        stored_digest,
+        digest_present,
+        bootable: cursor.read_u8()? != 0,
+        trusted: cursor.read_u8()? != 0,
+    })
+}
+
+fn decode_manifest(cursor: &mut Cursor<'_>) -> Result<FirmwarePackageManifest, PersistenceError> {
+    Ok(FirmwarePackageManifest {
+        manifest_version: cursor.read_u8()?,
+        image_version: read_firmware_version(cursor)?,
+        image_size_bytes: cursor.read_u32()?,
+        image_digest_sha256: {
+            let mut digest = [0u8; 32];
+            digest.copy_from_slice(cursor.read_bytes(32)?);
+            digest
+        },
+        target_slot_hint: decode_boot_slot_id(cursor.read_u8()?)?,
+        policy_flags: u16::from_le_bytes([cursor.read_u8()?, cursor.read_u8()?]),
+        signature_algorithm: cursor.read_u8()?,
+        signature_bytes: cursor.read_vec::<MAX_FIRMWARE_SIGNATURE_LEN>()?,
+    })
+}
+
 fn decode_policy_state(
     cursor: &mut Cursor<'_>,
 ) -> Result<(PolicyProfile, Vec<ApprovalTicket, MAX_APPROVAL_TICKETS>, u32), PersistenceError> {
@@ -936,8 +1142,82 @@ fn decode_protected_action_class(byte: u8) -> Result<ProtectedActionClass, Persi
         0x01 => Ok(ProtectedActionClass::DestructiveAdmin),
         0x02 => Ok(ProtectedActionClass::DestructiveKey),
         0x03 => Ok(ProtectedActionClass::RecoveryTransition),
+        0x04 => Ok(ProtectedActionClass::FirmwareUpdate),
         _ => Err(PersistenceError::DecodeFailure),
     }
+}
+
+fn decode_boot_slot_id(byte: u8) -> Result<BootSlotId, PersistenceError> {
+    BootSlotId::from_byte(byte).ok_or(PersistenceError::DecodeFailure)
+}
+
+fn decode_boot_slot_state(byte: u8) -> Result<BootSlotState, PersistenceError> {
+    match byte {
+        0x01 => Ok(BootSlotState::Empty),
+        0x02 => Ok(BootSlotState::ActiveTrusted),
+        0x03 => Ok(BootSlotState::StagedTransfer),
+        0x04 => Ok(BootSlotState::StagedValidated),
+        0x05 => Ok(BootSlotState::Invalid),
+        _ => Err(PersistenceError::DecodeFailure),
+    }
+}
+
+fn decode_trusted_boot_state(byte: u8) -> Result<TrustedBootState, PersistenceError> {
+    match byte {
+        0x01 => Ok(TrustedBootState::ActiveTrusted),
+        0x02 => Ok(TrustedBootState::StagedPending),
+        0x03 => Ok(TrustedBootState::StagedValidating),
+        0x04 => Ok(TrustedBootState::RecoveryRequired),
+        _ => Err(PersistenceError::DecodeFailure),
+    }
+}
+
+fn decode_update_result_class(byte: u8) -> Result<UpdateResultClass, PersistenceError> {
+    match byte {
+        0x00 => Ok(UpdateResultClass::None),
+        0x01 => Ok(UpdateResultClass::Begun),
+        0x02 => Ok(UpdateResultClass::Aborted),
+        0x03 => Ok(UpdateResultClass::Finalized),
+        0x04 => Ok(UpdateResultClass::Activated),
+        0x05 => Ok(UpdateResultClass::RollbackDenied),
+        0x06 => Ok(UpdateResultClass::SignatureRejected),
+        0x07 => Ok(UpdateResultClass::DigestMismatch),
+        0x08 => Ok(UpdateResultClass::Interrupted),
+        0x09 => Ok(UpdateResultClass::Recovered),
+        _ => Err(PersistenceError::DecodeFailure),
+    }
+}
+
+fn decode_update_transfer_phase(byte: u8) -> Result<UpdateTransferPhase, PersistenceError> {
+    match byte {
+        0x00 => Ok(UpdateTransferPhase::Empty),
+        0x01 => Ok(UpdateTransferPhase::ManifestAccepted),
+        0x02 => Ok(UpdateTransferPhase::Transferring),
+        0x03 => Ok(UpdateTransferPhase::Transferred),
+        0x04 => Ok(UpdateTransferPhase::Validating),
+        0x05 => Ok(UpdateTransferPhase::ActivationPending),
+        0x06 => Ok(UpdateTransferPhase::Aborted),
+        _ => Err(PersistenceError::DecodeFailure),
+    }
+}
+
+fn decode_update_recovery_reason(byte: u8) -> Result<UpdateRecoveryReason, PersistenceError> {
+    match byte {
+        0x00 => Ok(UpdateRecoveryReason::None),
+        0x01 => Ok(UpdateRecoveryReason::InterruptedTransfer),
+        0x02 => Ok(UpdateRecoveryReason::AmbiguousActivation),
+        0x03 => Ok(UpdateRecoveryReason::MetadataCorrupted),
+        _ => Err(PersistenceError::DecodeFailure),
+    }
+}
+
+fn read_firmware_version(cursor: &mut Cursor<'_>) -> Result<FirmwareVersion, PersistenceError> {
+    Ok(FirmwareVersion {
+        security_epoch: u16::from_le_bytes([cursor.read_u8()?, cursor.read_u8()?]),
+        major: u16::from_le_bytes([cursor.read_u8()?, cursor.read_u8()?]),
+        minor: u16::from_le_bytes([cursor.read_u8()?, cursor.read_u8()?]),
+        patch: u16::from_le_bytes([cursor.read_u8()?, cursor.read_u8()?]),
+    })
 }
 
 fn decode_approval_target_binding(byte: u8) -> Result<ApprovalTargetBinding, PersistenceError> {
@@ -1053,5 +1333,15 @@ impl<'a> Cursor<'a> {
         out.extend_from_slice(bytes)
             .map_err(|()| PersistenceError::DecodeFailure)?;
         Ok(out)
+    }
+
+    fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], PersistenceError> {
+        let end = self.index.saturating_add(len);
+        let bytes = self
+            .bytes
+            .get(self.index..end)
+            .ok_or(PersistenceError::DecodeFailure)?;
+        self.index = end;
+        Ok(bytes)
     }
 }

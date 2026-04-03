@@ -135,6 +135,12 @@ fn main() -> ! {
             protocol_engine.restore_audit_snapshot(state.audit);
             protocol_engine.restore_auth_snapshot(state.auth);
             protocol_engine.restore_crypto_persistent_state(state.crypto);
+            protocol_engine.restore_firmware_update_state(
+                state.accepted_firmware,
+                state.boot_slots,
+                state.update_transfer,
+                state.recovery,
+            );
             protocol_engine.restore_policy_profile(state.policy);
             protocol_engine.restore_approval_tickets(
                 state.approval_tickets,
@@ -148,6 +154,12 @@ fn main() -> ! {
             protocol_engine.restore_audit_snapshot(fallback.audit);
             protocol_engine.restore_auth_snapshot(fallback.auth);
             protocol_engine.restore_crypto_persistent_state(fallback.crypto);
+            protocol_engine.restore_firmware_update_state(
+                fallback.accepted_firmware,
+                fallback.boot_slots,
+                fallback.update_transfer,
+                fallback.recovery,
+            );
             protocol_engine.restore_policy_profile(fallback.policy);
             protocol_engine.restore_approval_tickets(
                 fallback.approval_tickets,
@@ -165,6 +177,10 @@ fn main() -> ! {
         audit: protocol_engine.audit_snapshot(),
         auth: protocol_engine.auth_snapshot().clone(),
         crypto: protocol_engine.crypto_persistent_state(),
+        accepted_firmware: protocol_engine.accepted_firmware_state(),
+        boot_slots: *protocol_engine.boot_slots(),
+        update_transfer: protocol_engine.update_transfer_state().clone(),
+        recovery: protocol_engine.recovery_state(),
         policy: protocol_engine.policy_profile(),
         approval_tickets: protocol_engine.approval_tickets().clone(),
         next_approval_ticket_id: protocol_engine.next_approval_ticket_id(),
@@ -228,6 +244,10 @@ fn main() -> ! {
                 let prior_audit = protocol_engine.audit_snapshot();
                 let prior_auth = protocol_engine.auth_snapshot().clone();
                 let prior_crypto = protocol_engine.crypto_persistent_state();
+                let prior_accepted_firmware = protocol_engine.accepted_firmware_state();
+                let prior_boot_slots = *protocol_engine.boot_slots();
+                let prior_update_transfer = protocol_engine.update_transfer_state().clone();
+                let prior_recovery = protocol_engine.recovery_state();
                 let prior_policy = protocol_engine.policy_profile();
                 let prior_approval_tickets = protocol_engine.approval_tickets().clone();
                 let prior_next_approval_ticket_id = protocol_engine.next_approval_ticket_id();
@@ -239,6 +259,10 @@ fn main() -> ! {
                     let current_audit = protocol_engine.audit_snapshot();
                     let current_auth = protocol_engine.auth_snapshot().clone();
                     let current_crypto = protocol_engine.crypto_persistent_state();
+                    let current_accepted_firmware = protocol_engine.accepted_firmware_state();
+                    let current_boot_slots = *protocol_engine.boot_slots();
+                    let current_update_transfer = protocol_engine.update_transfer_state().clone();
+                    let current_recovery = protocol_engine.recovery_state();
                     let current_policy = protocol_engine.policy_profile();
                     let current_approval_tickets = protocol_engine.approval_tickets().clone();
                     let current_next_approval_ticket_id = protocol_engine.next_approval_ticket_id();
@@ -247,6 +271,10 @@ fn main() -> ! {
                         || current_audit != prior_audit
                         || current_auth != prior_auth
                         || current_crypto != prior_crypto
+                        || current_accepted_firmware != prior_accepted_firmware
+                        || current_boot_slots != prior_boot_slots
+                        || current_update_transfer != prior_update_transfer
+                        || current_recovery != prior_recovery
                         || current_policy != prior_policy
                         || current_approval_tickets != prior_approval_tickets
                         || current_next_approval_ticket_id != prior_next_approval_ticket_id
@@ -257,6 +285,10 @@ fn main() -> ! {
                             audit: current_audit.clone(),
                             auth: current_auth.clone(),
                             crypto: current_crypto,
+                            accepted_firmware: current_accepted_firmware,
+                            boot_slots: current_boot_slots,
+                            update_transfer: current_update_transfer.clone(),
+                            recovery: current_recovery,
                             policy: current_policy,
                             approval_tickets: current_approval_tickets.clone(),
                             next_approval_ticket_id: current_next_approval_ticket_id,
@@ -267,6 +299,12 @@ fn main() -> ! {
                             protocol_engine.restore_audit_snapshot(prior_audit);
                             protocol_engine.restore_auth_snapshot(prior_auth);
                             protocol_engine.restore_crypto_persistent_state(prior_crypto);
+                            protocol_engine.restore_firmware_update_state(
+                                prior_accepted_firmware,
+                                prior_boot_slots,
+                                prior_update_transfer,
+                                prior_recovery,
+                            );
                             protocol_engine.restore_policy_profile(prior_policy);
                             protocol_engine.restore_approval_tickets(
                                 prior_approval_tickets,

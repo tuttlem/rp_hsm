@@ -114,6 +114,9 @@ The probe expects a `developer-mode` firmware image and validates:
 9. repeated failed authentication attempts triggering lockout
 10. reboot-driven invalidation of active authenticated sessions
 11. developer-only lifecycle reset back to `factory`
+12. signed firmware update control-plane behavior, including signed manifest
+    acceptance, version rollback denial, and recovery-required boot after an
+    injected ambiguous activation fault
 
 Policy-enforcement note:
 
@@ -131,6 +134,10 @@ Important:
 - The firmware still reserves the top 8 KiB of the configured 2 MiB flash image
   for developer-mode persistent-state snapshots. That space is outside the
   linked application image.
+- `008-signed-firmware-update` currently implements a signed update control
+  plane, version floor, staged slot metadata, and trusted recovery semantics.
+  It does not claim a production bootloader handoff or self-reflash path beyond
+  that modeled update state.
 - `cargo probe` is an on-device validation command. It will mutate lifecycle
   state, authenticate multiple reviewed roles, reboot the board once, and issue
   a developer reset when cleanup is required.
@@ -199,6 +206,11 @@ cargo rphsmtool recover-to-provisioned --device /dev/ttyACM0 --role recovery --p
 cargo rphsmtool reactivate-recovered --device /dev/ttyACM0 --transition-id 7 --role recovery --proof-env RPHSM_PROOF
 cargo rphsmtool get-random --device /dev/ttyACM0 --bytes 32 --role administrator --proof-env RPHSM_PROOF
 cargo rphsmtool get-audit-page --device /dev/ttyACM0 --start-sequence 0 --max-events 4 --role administrator --proof-env RPHSM_PROOF
+cargo rphsmtool update-status --device /dev/ttyACM0 --role administrator --proof-env RPHSM_PROOF
+cargo rphsmtool apply-update --device /dev/ttyACM0 --image update.bin --version 1.0.0.1 --role administrator --proof-env RPHSM_PROOF
+cargo rphsmtool abort-update --device /dev/ttyACM0 --session-id 7 --role administrator --proof-env RPHSM_PROOF
+cargo rphsmtool recover-trusted-firmware --device /dev/ttyACM0 --role recovery --proof-env RPHSM_PROOF
+cargo rphsmtool developer-update-fault --device /dev/ttyACM0 --action ambiguous-firmware-activation
 cargo rphsmtool sign --device /dev/ttyACM0 --key-id 1 --role key-manager --proof-env RPHSM_PROOF < message.bin > signature.bin
 cargo rphsmtool verify --device /dev/ttyACM0 --algorithm ed25519 --public-key-hex <HEX> --signature-hex <HEX> < message.bin
 cargo rphsmtool import-wrapped-key --device /dev/ttyACM0 --role key-manager --proof-env RPHSM_PROOF < envelope.bin
@@ -233,6 +245,12 @@ Behavior:
 - `get-random` writes raw bytes to stdout and sends any diagnostics to stderr.
 - `get-audit-page` writes bounded audit entry metadata to stdout and keeps
   secret-bearing request material out of the rendered output.
+- `update-status`, `apply-update`, `abort-update`, and
+  `recover-trusted-firmware` expose the signed-update workflow already present
+  in firmware. `apply-update` stages, finalizes, and activates a bounded signed
+  image package through the existing update control plane.
+- `developer-update-fault` injects developer-only firmware-update ambiguity or
+  rollback conditions for live recovery validation.
 - `sign` writes raw signature bytes to stdout.
 - `verify` reads the message from stdin and writes `true` or `false` to stdout.
 - Authentication proof input is taken from `--proof-env <VAR>` to avoid putting
@@ -258,6 +276,11 @@ cargo rphsmtool get-random --device /dev/ttyACM0 --bytes 16 --role administrator
 
 ```bash
 cargo rphsmtool get-audit-page --device /dev/ttyACM0 --start-sequence 0 --max-events 4 --role administrator --proof-env RPHSM_PROOF
+```
+
+```bash
+export RPHSM_PROOF=ADMIN
+cargo rphsmtool apply-update --device /dev/ttyACM0 --image update.bin --version 1.0.0.1 --role administrator --proof-env RPHSM_PROOF
 ```
 
 ```bash

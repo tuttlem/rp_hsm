@@ -368,6 +368,7 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
+ "rand_core 0.6.4",
  "sha2",
  "subtle",
  "zeroize",
@@ -632,8 +633,10 @@ name = "host_tools"
 version = "0.1.0"
 dependencies = [
  "chacha20poly1305",
+ "ed25519-dalek",
  "rp_hsm",
  "serialport",
+ "sha2",
 ]
 
 [[package]]
@@ -1237,6 +1240,7 @@ dependencies = [
  "p256",
  "rand_chacha",
  "rand_core 0.6.4",
+ "sha2",
 ]
 
 [[package]]

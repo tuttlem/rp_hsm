@@ -11,6 +11,7 @@ pub enum CommandFamily {
     Lifecycle,
     KeyStore,
     Crypto,
+    FirmwareUpdate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +54,14 @@ pub enum CommandId {
     Decrypt = 0x95,
     DeriveSharedSecret = 0x96,
     DeveloperSetPolicy = 0x97,
+    GetFirmwareUpdateStatus = 0x98,
+    BeginFirmwareUpdate = 0x99,
+    TransferFirmwareChunk = 0x9a,
+    FinalizeFirmwareUpdate = 0x9b,
+    ActivateFirmwareUpdate = 0x9c,
+    AbortFirmwareUpdate = 0x9d,
+    RecoverTrustedFirmware = 0x9e,
+    DeveloperUpdateFault = 0x9f,
 }
 
 impl CommandId {
@@ -96,6 +105,14 @@ impl CommandId {
             0x95 => Some(Self::Decrypt),
             0x96 => Some(Self::DeriveSharedSecret),
             0x97 => Some(Self::DeveloperSetPolicy),
+            0x98 => Some(Self::GetFirmwareUpdateStatus),
+            0x99 => Some(Self::BeginFirmwareUpdate),
+            0x9a => Some(Self::TransferFirmwareChunk),
+            0x9b => Some(Self::FinalizeFirmwareUpdate),
+            0x9c => Some(Self::ActivateFirmwareUpdate),
+            0x9d => Some(Self::AbortFirmwareUpdate),
+            0x9e => Some(Self::RecoverTrustedFirmware),
+            0x9f => Some(Self::DeveloperUpdateFault),
             _ => None,
         }
     }
@@ -709,6 +726,131 @@ pub const DERIVE_SHARED_SECRET: CommandDefinition = CommandDefinition {
     protected_action_class: ProtectedActionClass::None,
 };
 
+pub const GET_FIRMWARE_UPDATE_STATUS: CommandDefinition = CommandDefinition {
+    id: CommandId::GetFirmwareUpdateStatus,
+    family: CommandFamily::FirmwareUpdate,
+    min_payload_len: AUTH_HEADER_LEN,
+    max_payload_len: AUTH_HEADER_LEN,
+    allowed_device_states: &[
+        DeviceState::Operational,
+        DeviceState::Locked,
+        DeviceState::Recovery,
+        DeviceState::Zeroized,
+    ],
+    required_role: AuthorityRole::Administrator,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::Idempotent,
+    enabled: true,
+    developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
+};
+
+pub const BEGIN_FIRMWARE_UPDATE: CommandDefinition = CommandDefinition {
+    id: CommandId::BeginFirmwareUpdate,
+    family: CommandFamily::FirmwareUpdate,
+    min_payload_len: AUTH_HEADER_LEN + 51,
+    max_payload_len: AUTH_HEADER_LEN + 115,
+    allowed_device_states: OPERATIONAL_ONLY,
+    required_role: AuthorityRole::Administrator,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::FirmwareUpdate,
+};
+
+pub const TRANSFER_FIRMWARE_CHUNK: CommandDefinition = CommandDefinition {
+    id: CommandId::TransferFirmwareChunk,
+    family: CommandFamily::FirmwareUpdate,
+    min_payload_len: AUTH_HEADER_LEN + 10,
+    max_payload_len: AUTH_HEADER_LEN + 10 + 128,
+    allowed_device_states: OPERATIONAL_ONLY,
+    required_role: AuthorityRole::Administrator,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
+};
+
+pub const FINALIZE_FIRMWARE_UPDATE: CommandDefinition = CommandDefinition {
+    id: CommandId::FinalizeFirmwareUpdate,
+    family: CommandFamily::FirmwareUpdate,
+    min_payload_len: AUTH_HEADER_LEN + 5,
+    max_payload_len: AUTH_HEADER_LEN + 5,
+    allowed_device_states: OPERATIONAL_ONLY,
+    required_role: AuthorityRole::Administrator,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::FirmwareUpdate,
+};
+
+pub const ACTIVATE_FIRMWARE_UPDATE: CommandDefinition = CommandDefinition {
+    id: CommandId::ActivateFirmwareUpdate,
+    family: CommandFamily::FirmwareUpdate,
+    min_payload_len: AUTH_HEADER_LEN + 5,
+    max_payload_len: AUTH_HEADER_LEN + 5,
+    allowed_device_states: OPERATIONAL_ONLY,
+    required_role: AuthorityRole::Administrator,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::FirmwareUpdate,
+};
+
+pub const ABORT_FIRMWARE_UPDATE: CommandDefinition = CommandDefinition {
+    id: CommandId::AbortFirmwareUpdate,
+    family: CommandFamily::FirmwareUpdate,
+    min_payload_len: AUTH_HEADER_LEN + 4,
+    max_payload_len: AUTH_HEADER_LEN + 4,
+    allowed_device_states: &[DeviceState::Operational, DeviceState::Recovery],
+    required_role: AuthorityRole::Administrator,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
+};
+
+pub const RECOVER_TRUSTED_FIRMWARE: CommandDefinition = CommandDefinition {
+    id: CommandId::RecoverTrustedFirmware,
+    family: CommandFamily::FirmwareUpdate,
+    min_payload_len: AUTH_HEADER_LEN + 1,
+    max_payload_len: AUTH_HEADER_LEN + 1,
+    allowed_device_states: RECOVERY_ONLY,
+    required_role: AuthorityRole::Recovery,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::FirmwareUpdate,
+};
+
+pub const DEVELOPER_UPDATE_FAULT: CommandDefinition = CommandDefinition {
+    id: CommandId::DeveloperUpdateFault,
+    family: CommandFamily::FirmwareUpdate,
+    min_payload_len: 1,
+    max_payload_len: 1,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Developer,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: true,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
+};
+
 pub const PUBLIC_COMMANDS: &[CommandDefinition] = &[
     GET_PROTOCOL_VERSION,
     GET_DEVICE_STATUS,
@@ -767,6 +909,14 @@ pub fn definition_for(id: CommandId) -> CommandDefinition {
         CommandId::Encrypt => ENCRYPT,
         CommandId::Decrypt => DECRYPT,
         CommandId::DeriveSharedSecret => DERIVE_SHARED_SECRET,
+        CommandId::GetFirmwareUpdateStatus => GET_FIRMWARE_UPDATE_STATUS,
+        CommandId::BeginFirmwareUpdate => BEGIN_FIRMWARE_UPDATE,
+        CommandId::TransferFirmwareChunk => TRANSFER_FIRMWARE_CHUNK,
+        CommandId::FinalizeFirmwareUpdate => FINALIZE_FIRMWARE_UPDATE,
+        CommandId::ActivateFirmwareUpdate => ACTIVATE_FIRMWARE_UPDATE,
+        CommandId::AbortFirmwareUpdate => ABORT_FIRMWARE_UPDATE,
+        CommandId::RecoverTrustedFirmware => RECOVER_TRUSTED_FIRMWARE,
+        CommandId::DeveloperUpdateFault => DEVELOPER_UPDATE_FAULT,
     }
 }
 
@@ -822,6 +972,12 @@ pub fn get_visible_catalog(
             GET_HEALTH_STATUS,
             INVALIDATE_SESSION,
             GET_AUDIT_PAGE,
+            GET_FIRMWARE_UPDATE_STATUS,
+            BEGIN_FIRMWARE_UPDATE,
+            TRANSFER_FIRMWARE_CHUNK,
+            FINALIZE_FIRMWARE_UPDATE,
+            ACTIVATE_FIRMWARE_UPDATE,
+            ABORT_FIRMWARE_UPDATE,
             LOCK_DEVICE,
             UNLOCK_DEVICE,
             EXECUTE_ZEROIZE,
@@ -841,9 +997,12 @@ pub fn get_visible_catalog(
             GET_HEALTH_STATUS,
             INVALIDATE_SESSION,
             GET_AUDIT_PAGE,
+            GET_FIRMWARE_UPDATE_STATUS,
             ENTER_RECOVERY,
             RECOVER_TO_PROVISIONED,
             REACTIVATE_RECOVERED_PROVISIONING,
+            ABORT_FIRMWARE_UPDATE,
+            RECOVER_TRUSTED_FIRMWARE,
         ]),
         SessionState::Developer => {
             if developer_mode {
@@ -860,9 +1019,18 @@ pub fn get_visible_catalog(
                     VERIFY_DETACHED,
                     GET_HEALTH_STATUS,
                     GET_AUDIT_PAGE,
+                    GET_FIRMWARE_UPDATE_STATUS,
+                    BEGIN_FIRMWARE_UPDATE,
+                    TRANSFER_FIRMWARE_CHUNK,
+                    FINALIZE_FIRMWARE_UPDATE,
+                    ACTIVATE_FIRMWARE_UPDATE,
+                    ABORT_FIRMWARE_UPDATE,
+                    RECOVER_TRUSTED_FIRMWARE,
                     DEVELOPER_RESET_LIFECYCLE,
                     DEVELOPER_STORE_FAULT,
                     DEVELOPER_REBOOT,
+                    DEVELOPER_SET_POLICY,
+                    DEVELOPER_UPDATE_FAULT,
                 ]
             } else {
                 PUBLIC_COMMANDS
@@ -889,6 +1057,7 @@ pub fn get_visible_catalog(
             SIGN_DETACHED,
             GENERATE_RANDOM,
             IMPORT_WRAPPED_KEY,
+            GET_FIRMWARE_UPDATE_STATUS,
         ]),
     }
 }

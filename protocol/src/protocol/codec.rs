@@ -5,14 +5,19 @@ use super::frame::{
     RESERVED_FLAG_MASK,
 };
 use super::state::{
-    ApprovalTicket, AuditEvent, AuditRetrievalCursor, AuthorityRole, CryptoCapabilities,
-    DenialClass, DeveloperResetOutcome, DeviceState, ExportPolicy, HealthStatusView,
-    ImportWrappedKeyRequest, KeyAlgorithm, KeyDestroyResult, KeyListEntry, KeyMaterialEnvelope,
-    KeyMetadataView, KeyOrigin, KeyRecordResult, KeyStoreStatus, LifecycleStatus, LockResult,
-    MAX_CRYPTO_MESSAGE_LEN, MAX_RANDOM_OUTPUT_LEN, MAX_SIGNATURE_LEN, MAX_WRAPPED_CIPHERTEXT_LEN,
-    MAX_WRAPPED_TAG_LEN, P256_PUBLIC_KEY_LEN, PolicyProfile, PutPersistentKeyRequest,
-    RandomRequest, RecoveryResult, SessionState, SessionStatus, SignRequest, StateRevision,
-    TransitionResult, VerifyRequest, ZeroizeOutcome,
+    ApprovalTicket, AuditEvent, AuditRetrievalCursor, AuthorityRole, BeginFirmwareUpdateRequest,
+    BootSlotId, CryptoCapabilities, DenialClass, DeveloperResetOutcome, DeviceState,
+    ExportPolicy, FirmwareAbortResult, FirmwareActivationResult, FirmwareChunkProgress,
+    FirmwareChunkRequest, FirmwareFinalizeResult, FirmwarePackageManifest,
+    FirmwareRecoveryResult, FirmwareUpdateBeginResult, FirmwareUpdateStatus, FirmwareVersion,
+    HealthStatusView, ImportWrappedKeyRequest, KeyAlgorithm, KeyDestroyResult, KeyListEntry,
+    KeyMaterialEnvelope, KeyMetadataView, KeyOrigin, KeyRecordResult, KeyStoreStatus,
+    LifecycleStatus, LockResult, MAX_CRYPTO_MESSAGE_LEN, MAX_FIRMWARE_CHUNK_LEN,
+    MAX_FIRMWARE_SIGNATURE_LEN, MAX_RANDOM_OUTPUT_LEN, MAX_SIGNATURE_LEN,
+    MAX_WRAPPED_CIPHERTEXT_LEN, MAX_WRAPPED_TAG_LEN, P256_PUBLIC_KEY_LEN, PolicyProfile,
+    PutPersistentKeyRequest, RandomRequest, RecoveryResult, SessionState, SessionStatus,
+    SignRequest, StateRevision, TransitionResult, UPDATE_MANIFEST_VERSION, VerifyRequest,
+    ZeroizeOutcome,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -446,6 +451,160 @@ pub fn encode_health_status_payload(status: HealthStatusView) -> [u8; 13] {
 }
 
 #[must_use]
+pub fn encode_firmware_version(version: FirmwareVersion) -> [u8; 8] {
+    let epoch = version.security_epoch.to_le_bytes();
+    let major = version.major.to_le_bytes();
+    let minor = version.minor.to_le_bytes();
+    let patch = version.patch.to_le_bytes();
+    [
+        epoch[0], epoch[1], major[0], major[1], minor[0], minor[1], patch[0], patch[1],
+    ]
+}
+
+#[must_use]
+pub fn encode_firmware_update_status_payload(
+    status: FirmwareUpdateStatus,
+) -> [u8; 25] {
+    let active_version = encode_firmware_version(status.active_version);
+    let minimum_version = encode_firmware_version(status.minimum_accepted_version);
+    let policy_revision = status.policy_revision.to_le_bytes();
+    [
+        status.active_slot as u8,
+        active_version[0],
+        active_version[1],
+        active_version[2],
+        active_version[3],
+        active_version[4],
+        active_version[5],
+        active_version[6],
+        active_version[7],
+        minimum_version[0],
+        minimum_version[1],
+        minimum_version[2],
+        minimum_version[3],
+        minimum_version[4],
+        minimum_version[5],
+        minimum_version[6],
+        minimum_version[7],
+        status.transfer_phase as u8,
+        status.staged_slot_state as u8,
+        u8::from(status.recovery_required),
+        status.last_update_result as u8,
+        policy_revision[0],
+        policy_revision[1],
+        policy_revision[2],
+        policy_revision[3],
+    ]
+}
+
+#[must_use]
+pub fn encode_firmware_update_begin_payload(
+    result: FirmwareUpdateBeginResult,
+) -> [u8; 13] {
+    let session_id = result.update_session_id.to_le_bytes();
+    let expected = result.expected_size.to_le_bytes();
+    let policy = result.policy_revision.to_le_bytes();
+    [
+        result.target_slot as u8,
+        session_id[0],
+        session_id[1],
+        session_id[2],
+        session_id[3],
+        expected[0],
+        expected[1],
+        expected[2],
+        expected[3],
+        policy[0],
+        policy[1],
+        policy[2],
+        policy[3],
+    ]
+}
+
+#[must_use]
+pub fn encode_firmware_chunk_progress_payload(
+    progress: FirmwareChunkProgress,
+) -> [u8; 8] {
+    let received = progress.bytes_received.to_le_bytes();
+    let remaining = progress.remaining_bytes.to_le_bytes();
+    [
+        received[0],
+        received[1],
+        received[2],
+        received[3],
+        remaining[0],
+        remaining[1],
+        remaining[2],
+        remaining[3],
+    ]
+}
+
+#[must_use]
+pub fn encode_firmware_finalize_payload(
+    result: FirmwareFinalizeResult,
+) -> [u8; 10] {
+    let version = encode_firmware_version(result.validated_version);
+    [
+        result.staged_slot as u8,
+        version[0],
+        version[1],
+        version[2],
+        version[3],
+        version[4],
+        version[5],
+        version[6],
+        version[7],
+        u8::from(result.activation_pending),
+    ]
+}
+
+#[must_use]
+pub fn encode_firmware_activation_payload(
+    result: FirmwareActivationResult,
+) -> [u8; 10] {
+    let version = encode_firmware_version(result.next_version);
+    [
+        result.next_boot_slot as u8,
+        version[0],
+        version[1],
+        version[2],
+        version[3],
+        version[4],
+        version[5],
+        version[6],
+        version[7],
+        u8::from(result.reboot_required),
+    ]
+}
+
+#[must_use]
+pub fn encode_firmware_abort_payload(result: FirmwareAbortResult) -> [u8; 2] {
+    [
+        u8::from(result.transfer_state_cleared),
+        u8::from(result.staged_slot_invalidated),
+    ]
+}
+
+#[must_use]
+pub fn encode_firmware_recovery_payload(
+    result: FirmwareRecoveryResult,
+) -> [u8; 10] {
+    let version = encode_firmware_version(result.restored_version);
+    [
+        result.restored_slot as u8,
+        version[0],
+        version[1],
+        version[2],
+        version[3],
+        version[4],
+        version[5],
+        version[6],
+        version[7],
+        u8::from(result.recovery_required),
+    ]
+}
+
+#[must_use]
 pub fn encode_audit_page_payload(
     events: &[AuditEvent],
     cursor: AuditRetrievalCursor,
@@ -653,6 +812,98 @@ pub fn decode_import_wrapped_key_request(
         target_export_policy,
         ciphertext,
         integrity_tag,
+    })
+}
+
+fn decode_firmware_version(bytes: &[u8]) -> Result<FirmwareVersion, StatusCode> {
+    if bytes.len() != 8 {
+        return Err(StatusCode::ValidationError);
+    }
+    Ok(FirmwareVersion {
+        security_epoch: u16::from_le_bytes([bytes[0], bytes[1]]),
+        major: u16::from_le_bytes([bytes[2], bytes[3]]),
+        minor: u16::from_le_bytes([bytes[4], bytes[5]]),
+        patch: u16::from_le_bytes([bytes[6], bytes[7]]),
+    })
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the firmware-update manifest is malformed.
+pub fn decode_begin_firmware_update_request(
+    payload: &[u8],
+) -> Result<BeginFirmwareUpdateRequest, StatusCode> {
+    if payload.len() < 48 {
+        return Err(StatusCode::ValidationError);
+    }
+    let manifest_version = payload[0];
+    if manifest_version != UPDATE_MANIFEST_VERSION {
+        return Err(StatusCode::ValidationError);
+    }
+    let image_version = decode_firmware_version(&payload[1..9])?;
+    let image_size_bytes = u32::from_le_bytes([payload[9], payload[10], payload[11], payload[12]]);
+    if image_size_bytes == 0 {
+        return Err(StatusCode::ValidationError);
+    }
+    let mut image_digest_sha256 = [0u8; 32];
+    image_digest_sha256.copy_from_slice(&payload[13..45]);
+    let target_slot_hint = BootSlotId::from_byte(payload[45]).ok_or(StatusCode::ValidationError)?;
+    let policy_flags = u16::from_le_bytes([payload[46], payload[47]]);
+    if payload.len() < 51 {
+        return Err(StatusCode::ValidationError);
+    }
+    let signature_algorithm = payload[48];
+    let signature_len = usize::from(u16::from_le_bytes([payload[49], payload[50]]));
+    if signature_len == 0
+        || signature_len > MAX_FIRMWARE_SIGNATURE_LEN
+        || payload.len() != 51 + signature_len
+    {
+        return Err(StatusCode::ValidationError);
+    }
+    let mut signature_bytes = Vec::<u8, MAX_FIRMWARE_SIGNATURE_LEN>::new();
+    signature_bytes
+        .extend_from_slice(&payload[51..])
+        .map_err(|()| StatusCode::ValidationError)?;
+    Ok(BeginFirmwareUpdateRequest {
+        manifest: FirmwarePackageManifest {
+            manifest_version,
+            image_version,
+            image_size_bytes,
+            image_digest_sha256,
+            target_slot_hint,
+            policy_flags,
+            signature_algorithm,
+            signature_bytes,
+        },
+    })
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the transfer chunk request is malformed.
+pub fn decode_firmware_chunk_request(
+    payload: &[u8],
+) -> Result<FirmwareChunkRequest, StatusCode> {
+    if payload.len() < 10 {
+        return Err(StatusCode::ValidationError);
+    }
+    let update_session_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    let chunk_offset = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+    let chunk_len = usize::from(u16::from_le_bytes([payload[8], payload[9]]));
+    if chunk_len == 0
+        || chunk_len > MAX_FIRMWARE_CHUNK_LEN
+        || payload.len() != 10 + chunk_len
+    {
+        return Err(StatusCode::ValidationError);
+    }
+    let mut chunk = Vec::<u8, MAX_FIRMWARE_CHUNK_LEN>::new();
+    chunk
+        .extend_from_slice(&payload[10..])
+        .map_err(|()| StatusCode::ValidationError)?;
+    Ok(FirmwareChunkRequest {
+        update_session_id,
+        chunk_offset,
+        chunk,
     })
 }
 

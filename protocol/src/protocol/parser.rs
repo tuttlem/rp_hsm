@@ -5,16 +5,22 @@ use chacha20poly1305::{
 };
 use ed25519_dalek::{Signer, Verifier};
 use p256::ecdsa::{Signature as P256Signature, VerifyingKey as P256VerifyingKey};
+use sha2::{Digest, Sha256};
 
 use super::codec::{
     DecodeError, StatusCode, clear_bytes, decode_audit_page_request,
     decode_authentication_role, decode_authorized_payload,
-    decode_complete_authentication_request, decode_frame, decode_import_wrapped_key_request,
+    decode_begin_firmware_update_request, decode_complete_authentication_request,
+    decode_firmware_chunk_request, decode_frame, decode_import_wrapped_key_request,
     decode_key_id_request, decode_key_marker_request, decode_put_persistent_key_request,
     decode_random_request, decode_sign_request, decode_transition_request,
     decode_verify_request, encode_audit_page_payload, encode_auth_challenge_payload,
     encode_auth_session_payload, encode_crypto_capabilities_payload,
-    encode_developer_reset_payload, encode_device_status_payload, encode_key_destroy_payload,
+    encode_developer_reset_payload, encode_device_status_payload,
+    encode_firmware_abort_payload, encode_firmware_activation_payload,
+    encode_firmware_chunk_progress_payload, encode_firmware_finalize_payload,
+    encode_firmware_recovery_payload, encode_firmware_update_begin_payload,
+    encode_firmware_update_status_payload, encode_key_destroy_payload,
     encode_key_list_payload, encode_key_metadata_payload, encode_key_record_result_payload,
     encode_key_store_status_payload, encode_lifecycle_status_payload, encode_lock_result_payload,
     encode_policy_denial_payload, encode_policy_profile_payload, encode_random_payload,
@@ -30,18 +36,25 @@ use super::frame::{
 use super::state::{
     ApprovalTargetBinding, ApprovalTicket, ApprovalTicketState, AuditEventClass, AuditEventCode,
     AuditJournal, AuditResultClass, AuditStoreSnapshot, AuthSnapshot, AuthenticationChallenge,
-    AuthorityRole, CryptoPersistentState, CryptoRuntimeState, DenialClass, DeviceState,
-    KeyAlgorithm, KeyLifecycleState, PersistentKeyStore, PolicyProfile, ProtectedActionClass,
-    ProvisioningRecord, ProvisioningSnapshot, SessionLifecycleState, SessionRecord, SessionState,
-    SessionTracker, USAGE_SIGN, USAGE_WRAP_IMPORT, clear_active_session,
+    AuthorityRole, BootSlotId, BootSlotMetadata, BootSlotState, CryptoPersistentState,
+    CryptoRuntimeState, DenialClass, DeviceState, FirmwareAbortResult, FirmwareActivationResult,
+    FirmwareChunkProgress, FirmwareFinalizeResult, FirmwarePackageManifest,
+    FirmwareRecoveryResult, FirmwareUpdateBeginResult, FirmwareVersion, KeyAlgorithm,
+    KeyLifecycleState, PersistentKeyStore, PolicyProfile, ProtectedActionClass,
+    ProvisioningRecord, ProvisioningSnapshot, RecoveryState, SessionLifecycleState, SessionRecord,
+    SessionState, SessionTracker, TrustedBootState, UPDATE_MANIFEST_VERSION,
+    UPDATE_SIGNATURE_ALGORITHM_ED25519, UpdateRecoveryReason, UpdateResultClass,
+    UpdateTransferPhase, UpdateTransferState, USAGE_SIGN, USAGE_WRAP_IMPORT,
+    AcceptedFirmwareState, clear_active_session, default_boot_slots,
     clear_approval_tickets, clear_auth_failures, clear_challenge, clear_failure_counters,
     clear_secret_array, current_session_state, current_session_status, developer_mode_session,
-    developer_reset_marker, enforce_replay_policy, evaluate_command_policy, evaluate_key_policy,
-    expect_marker_bytes, expect_single_marker, finalize_marker, find_credential,
-    fingerprint_frame, invalidate_approval_tickets, issue_challenge_nonce, new_approval_ticket,
-    reactivate_marker, record_auth_failure, recovery_marker, retain_active_approval_tickets,
+    developer_reset_marker, ed25519_public_key_from_seed, enforce_replay_policy,
+    evaluate_command_policy, evaluate_key_policy, expect_marker_bytes, expect_single_marker,
+    finalize_marker, find_credential, fingerprint_frame, firmware_version_allowed,
+    invalidate_approval_tickets, issue_challenge_nonce, new_approval_ticket, reactivate_marker,
+    reconcile_update_boot, record_auth_failure, recovery_marker, retain_active_approval_tickets,
     revoke_marker, role_locked_out, role_to_authorization_mode, status_for_denial_class,
-    unlock_marker, zeroize_marker, MAX_APPROVAL_TICKETS,
+    unlock_marker, update_status_view, zeroize_marker, MAX_APPROVAL_TICKETS,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +63,8 @@ pub enum DeveloperStoreFaultAction {
     RollbackPersistedStore = 0x02,
     CorruptPersistedAudit = 0x03,
     RollbackPersistedAudit = 0x04,
+    AmbiguousFirmwareActivation = 0x05,
+    RollbackFirmwareVersion = 0x06,
 }
 
 impl DeveloperStoreFaultAction {
@@ -60,6 +75,8 @@ impl DeveloperStoreFaultAction {
             0x02 => Some(Self::RollbackPersistedStore),
             0x03 => Some(Self::CorruptPersistedAudit),
             0x04 => Some(Self::RollbackPersistedAudit),
+            0x05 => Some(Self::AmbiguousFirmwareActivation),
+            0x06 => Some(Self::RollbackFirmwareVersion),
             _ => None,
         }
     }
@@ -71,6 +88,8 @@ pub enum FirmwareAction {
     DeveloperReboot,
 }
 
+const UPDATE_TRUST_ANCHOR_SEED: &[u8; 32] = b"rp_hsm_update_anchor_seed_v1____";
+
 pub struct ProtocolEngine {
     record: ProvisioningRecord,
     key_store: PersistentKeyStore,
@@ -78,6 +97,10 @@ pub struct ProtocolEngine {
     crypto_state: CryptoRuntimeState,
     audit_journal: AuditJournal,
     policy_profile: PolicyProfile,
+    accepted_firmware: AcceptedFirmwareState,
+    boot_slots: [BootSlotMetadata; 2],
+    update_transfer: UpdateTransferState,
+    recovery_state: RecoveryState,
     approval_tickets: Vec<ApprovalTicket, MAX_APPROVAL_TICKETS>,
     next_approval_ticket_id: u32,
     active_challenge: Option<AuthenticationChallenge>,
@@ -101,6 +124,10 @@ impl ProtocolEngine {
             crypto_state: CryptoRuntimeState::default(),
             audit_journal: AuditJournal::new(),
             policy_profile: PolicyProfile::default(),
+            accepted_firmware: AcceptedFirmwareState::default(),
+            boot_slots: default_boot_slots(AcceptedFirmwareState::default()),
+            update_transfer: UpdateTransferState::default(),
+            recovery_state: RecoveryState::default(),
             approval_tickets: Vec::new(),
             next_approval_ticket_id: 1,
             active_challenge: None,
@@ -163,6 +190,17 @@ impl ProtocolEngine {
             .sync_device_revision(self.record.revision_counter());
         self.key_store.reconcile_after_boot();
         self.audit_journal.reconcile_after_boot();
+        reconcile_update_boot(
+            &mut self.accepted_firmware,
+            &mut self.update_transfer,
+            &mut self.boot_slots,
+            &mut self.recovery_state,
+        );
+        if self.accepted_firmware.recovery_required && self.record.current_state() != DeviceState::Recovery {
+            let mut snapshot = self.record.snapshot();
+            snapshot.lifecycle_state.state_code = DeviceState::Recovery;
+            self.record.restore_snapshot(snapshot);
+        }
         invalidate_approval_tickets(&mut self.approval_tickets);
         retain_active_approval_tickets(&mut self.approval_tickets);
         clear_challenge(&mut self.active_challenge);
@@ -199,6 +237,26 @@ impl ProtocolEngine {
     #[must_use]
     pub fn policy_profile(&self) -> PolicyProfile {
         self.policy_profile
+    }
+
+    #[must_use]
+    pub fn accepted_firmware_state(&self) -> AcceptedFirmwareState {
+        self.accepted_firmware
+    }
+
+    #[must_use]
+    pub fn boot_slots(&self) -> &[BootSlotMetadata; 2] {
+        &self.boot_slots
+    }
+
+    #[must_use]
+    pub fn update_transfer_state(&self) -> &UpdateTransferState {
+        &self.update_transfer
+    }
+
+    #[must_use]
+    pub fn recovery_state(&self) -> RecoveryState {
+        self.recovery_state
     }
 
     #[must_use]
@@ -242,6 +300,19 @@ impl ProtocolEngine {
     pub fn restore_policy_profile(&mut self, profile: PolicyProfile) {
         self.policy_profile = profile;
         self.policy_profile.developer_commands_visible = self.developer_mode;
+    }
+
+    pub fn restore_firmware_update_state(
+        &mut self,
+        accepted: AcceptedFirmwareState,
+        boot_slots: [BootSlotMetadata; 2],
+        transfer: UpdateTransferState,
+        recovery: RecoveryState,
+    ) {
+        self.accepted_firmware = accepted;
+        self.boot_slots = boot_slots;
+        self.update_transfer = transfer;
+        self.recovery_state = recovery;
     }
 
     pub fn restore_audit_snapshot(&mut self, snapshot: AuditStoreSnapshot) {
@@ -336,6 +407,34 @@ impl ProtocolEngine {
 
     fn current_session_id(&self) -> u32 {
         self.active_session.map_or(0, |session| session.session_id)
+    }
+
+    fn trusted_update_public_key() -> Option<[u8; 32]> {
+        ed25519_public_key_from_seed(UPDATE_TRUST_ANCHOR_SEED)
+    }
+
+    fn active_slot_index(&self) -> usize {
+        usize::from(self.accepted_firmware.active_slot != BootSlotId::A)
+    }
+
+    fn staged_slot_index(&self) -> usize {
+        usize::from(self.accepted_firmware.active_slot == BootSlotId::A)
+    }
+
+    fn firmware_update_status(&self) -> super::state::FirmwareUpdateStatus {
+        update_status_view(
+            self.accepted_firmware,
+            &self.update_transfer,
+            &self.boot_slots,
+            self.policy_profile.policy_revision,
+        )
+    }
+
+    fn clear_update_transfer(&mut self) {
+        self.update_transfer = UpdateTransferState::default();
+        let staged_index = self.staged_slot_index();
+        let staged_slot_id = self.boot_slots[staged_index].slot_id;
+        self.boot_slots[staged_index] = BootSlotMetadata::new(staged_slot_id, BootSlotState::Empty);
     }
 
     fn effective_actor_role(&self) -> AuthorityRole {
@@ -695,6 +794,14 @@ impl ProtocolEngine {
             Some(CommandId::SignDetached) => self.handle_sign_detached(frame),
             Some(CommandId::GenerateRandom) => self.handle_generate_random(frame),
             Some(CommandId::ImportWrappedKey) => self.handle_import_wrapped_key(frame),
+            Some(CommandId::GetFirmwareUpdateStatus) => self.handle_get_firmware_update_status(frame),
+            Some(CommandId::BeginFirmwareUpdate) => self.handle_begin_firmware_update(frame),
+            Some(CommandId::TransferFirmwareChunk) => self.handle_transfer_firmware_chunk(frame),
+            Some(CommandId::FinalizeFirmwareUpdate) => self.handle_finalize_firmware_update(frame),
+            Some(CommandId::ActivateFirmwareUpdate) => self.handle_activate_firmware_update(frame),
+            Some(CommandId::AbortFirmwareUpdate) => self.handle_abort_firmware_update(frame),
+            Some(CommandId::RecoverTrustedFirmware) => self.handle_recover_trusted_firmware(frame),
+            Some(CommandId::DeveloperUpdateFault) => self.handle_developer_update_fault(frame),
             Some(
                 CommandId::ExportWrappedKey
                 | CommandId::Encrypt
@@ -775,6 +882,383 @@ impl ProtocolEngine {
             AuditResultClass::Success,
             &[self.record.current_state() as u8, self.audit_journal.store_state() as u8],
         );
+        status_response(StatusCode::Success, &payload)
+    }
+
+    fn manifest_signature_message(
+        manifest: &FirmwarePackageManifest,
+    ) -> [u8; 48] {
+        let version = manifest.image_version;
+        let size = manifest.image_size_bytes.to_le_bytes();
+        let flags = manifest.policy_flags.to_le_bytes();
+        let mut message = [0u8; 48];
+        message[0] = manifest.manifest_version;
+        message[1..3].copy_from_slice(&version.security_epoch.to_le_bytes());
+        message[3..5].copy_from_slice(&version.major.to_le_bytes());
+        message[5..7].copy_from_slice(&version.minor.to_le_bytes());
+        message[7..9].copy_from_slice(&version.patch.to_le_bytes());
+        message[9..13].copy_from_slice(&size);
+        message[13..45].copy_from_slice(&manifest.image_digest_sha256);
+        message[45] = manifest.target_slot_hint as u8;
+        message[46..48].copy_from_slice(&flags);
+        message
+    }
+
+    fn handle_get_firmware_update_status(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        if let Err(status) = self.authorize_any_owned::<0>(
+            &[AuthorityRole::Administrator, AuthorityRole::Recovery],
+            frame.payload.as_slice(),
+            0,
+            0,
+        ) {
+            return status_response(status, &[]);
+        }
+        let payload = encode_firmware_update_status_payload(self.firmware_update_status());
+        status_response(StatusCode::Success, &payload)
+    }
+
+    fn handle_begin_firmware_update(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        let (_, inner) = match self.authorize_privileged_owned::<128>(
+            AuthorityRole::Administrator,
+            frame.payload.as_slice(),
+            51,
+            115,
+        ) {
+            Ok(values) => values,
+            Err(status) => return status_response(status, &[]),
+        };
+        let request = match decode_begin_firmware_update_request(inner.as_slice()) {
+            Ok(request) => request,
+            Err(status) => return status_response(status, &[]),
+        };
+        if request.manifest.manifest_version != UPDATE_MANIFEST_VERSION
+            || request.manifest.signature_algorithm != UPDATE_SIGNATURE_ALGORITHM_ED25519
+        {
+            return status_response(StatusCode::ValidationError, &[]);
+        }
+        if usize::try_from(request.manifest.image_size_bytes).unwrap_or(usize::MAX)
+            > super::state::MAX_FIRMWARE_IMAGE_SIZE
+        {
+            return status_response(StatusCode::ValidationError, &[]);
+        }
+        if request.manifest.target_slot_hint != self.accepted_firmware.active_slot.other() {
+            return status_response(StatusCode::StateError, &[]);
+        }
+        if let Err(denial) = firmware_version_allowed(request.manifest.image_version, self.accepted_firmware) {
+            self.accepted_firmware.last_update_result = UpdateResultClass::RollbackDenied;
+            return policy_status_response(status_for_denial_class(denial), denial, None);
+        }
+        let Some(public_key_bytes) = Self::trusted_update_public_key() else {
+            return status_response(StatusCode::InternalError, &[]);
+        };
+        let Ok(verifying_key) = ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes) else {
+            return status_response(StatusCode::InternalError, &[]);
+        };
+        let Ok(signature) = ed25519_dalek::Signature::from_slice(
+            request.manifest.signature_bytes.as_slice(),
+        ) else {
+            self.accepted_firmware.last_update_result = UpdateResultClass::SignatureRejected;
+            return status_response(StatusCode::ValidationError, &[]);
+        };
+        let message = Self::manifest_signature_message(&request.manifest);
+        if verifying_key.verify(&message, &signature).is_err() {
+            self.accepted_firmware.last_update_result = UpdateResultClass::SignatureRejected;
+            return status_response(StatusCode::AuthorizationError, &[]);
+        }
+        let approval_target = self.record.revision_counter();
+        if let Err(response) = self.maybe_create_or_confirm_approval(
+            ProtectedActionClass::FirmwareUpdate,
+            ApprovalTargetBinding::Device,
+            approval_target,
+            AuthorityRole::Administrator,
+            self.policy_profile.policy_revision,
+        ) {
+            return response;
+        }
+        let target_slot = request.manifest.target_slot_hint;
+        let target_index = usize::from(target_slot != BootSlotId::A);
+        self.boot_slots[target_index].slot_state = BootSlotState::StagedTransfer;
+        self.boot_slots[target_index].stored_version = request.manifest.image_version;
+        self.boot_slots[target_index].version_present = true;
+        self.boot_slots[target_index].stored_digest = request.manifest.image_digest_sha256;
+        self.boot_slots[target_index].digest_present = true;
+        self.boot_slots[target_index].bootable = false;
+        self.boot_slots[target_index].trusted = false;
+        self.update_transfer.phase = UpdateTransferPhase::ManifestAccepted;
+        self.update_transfer.session_id = self.record.revision_counter().saturating_add(1);
+        self.update_transfer.manifest = Some(request.manifest.clone());
+        self.update_transfer.bytes_received = 0;
+        self.update_transfer.expected_size = request.manifest.image_size_bytes;
+        self.update_transfer.staged_image.clear();
+        self.update_transfer.started_revision = self.record.revision_counter();
+        self.update_transfer.policy_revision = self.policy_profile.policy_revision;
+        self.accepted_firmware.trusted_boot_state = TrustedBootState::StagedPending;
+        self.accepted_firmware.last_update_result = UpdateResultClass::Begun;
+        self.record_audit_event(
+            AuditEventClass::Administrative,
+            AuditEventCode::CommandCompleted,
+            AuditResultClass::Success,
+            &[frame.code, target_slot as u8],
+        );
+        let payload = encode_firmware_update_begin_payload(FirmwareUpdateBeginResult {
+            target_slot,
+            update_session_id: self.update_transfer.session_id,
+            expected_size: self.update_transfer.expected_size,
+            policy_revision: self.policy_profile.policy_revision,
+        });
+        status_response(StatusCode::Success, &payload)
+    }
+
+    fn handle_transfer_firmware_chunk(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        let (_, inner) = match self.authorize_privileged_owned::<140>(
+            AuthorityRole::Administrator,
+            frame.payload.as_slice(),
+            10,
+            138,
+        ) {
+            Ok(values) => values,
+            Err(status) => return status_response(status, &[]),
+        };
+        let request = match decode_firmware_chunk_request(inner.as_slice()) {
+            Ok(request) => request,
+            Err(status) => return status_response(status, &[]),
+        };
+        if self.update_transfer.session_id != request.update_session_id
+            || self.update_transfer.manifest.is_none()
+        {
+            return status_response(StatusCode::StateError, &[]);
+        }
+        if request.chunk_offset != self.update_transfer.bytes_received {
+            return status_response(StatusCode::ValidationError, &[]);
+        }
+        if usize::try_from(self.update_transfer.bytes_received).unwrap_or(usize::MAX)
+            + request.chunk.len()
+            > super::state::MAX_FIRMWARE_IMAGE_SIZE
+        {
+            return status_response(StatusCode::ValidationError, &[]);
+        }
+        if self
+            .update_transfer
+            .staged_image
+            .extend_from_slice(request.chunk.as_slice())
+            .is_err()
+        {
+            return status_response(StatusCode::InternalError, &[]);
+        }
+        self.update_transfer.phase = UpdateTransferPhase::Transferring;
+        self.update_transfer.bytes_received = self
+            .update_transfer
+            .bytes_received
+            .saturating_add(u32::try_from(request.chunk.len()).unwrap_or(0));
+        if self.update_transfer.bytes_received == self.update_transfer.expected_size {
+            self.update_transfer.phase = UpdateTransferPhase::Transferred;
+        }
+        let remaining = self
+            .update_transfer
+            .expected_size
+            .saturating_sub(self.update_transfer.bytes_received);
+        let payload = encode_firmware_chunk_progress_payload(FirmwareChunkProgress {
+            bytes_received: self.update_transfer.bytes_received,
+            remaining_bytes: remaining,
+        });
+        status_response(StatusCode::Success, &payload)
+    }
+
+    fn handle_finalize_firmware_update(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        let (_, inner) = match self.authorize_privileged_owned::<5>(
+            AuthorityRole::Administrator,
+            frame.payload.as_slice(),
+            5,
+            5,
+        ) {
+            Ok(values) => values,
+            Err(status) => return status_response(status, &[]),
+        };
+        let update_session_id = match decode_transition_request(inner.as_slice(), finalize_marker()) {
+            Ok(value) => value,
+            Err(status) => return status_response(status, &[]),
+        };
+        if self.update_transfer.session_id != update_session_id
+            || self.update_transfer.phase != UpdateTransferPhase::Transferred
+        {
+            return status_response(StatusCode::StateError, &[]);
+        }
+        let Some(manifest) = self.update_transfer.manifest.as_ref() else {
+            return status_response(StatusCode::StateError, &[]);
+        };
+        let validated_version = manifest.image_version;
+        if usize::try_from(self.update_transfer.expected_size).unwrap_or(usize::MAX)
+            != self.update_transfer.staged_image.len()
+        {
+            return status_response(StatusCode::StateError, &[]);
+        }
+        self.update_transfer.phase = UpdateTransferPhase::Validating;
+        let digest = Sha256::digest(self.update_transfer.staged_image.as_slice());
+        if digest.as_slice() != manifest.image_digest_sha256 {
+            self.accepted_firmware.last_update_result = UpdateResultClass::DigestMismatch;
+            self.clear_update_transfer();
+            return status_response(StatusCode::ValidationError, &[]);
+        }
+        let approval_target = self.record.revision_counter();
+        if let Err(response) = self.maybe_create_or_confirm_approval(
+            ProtectedActionClass::FirmwareUpdate,
+            ApprovalTargetBinding::Device,
+            approval_target,
+            AuthorityRole::Administrator,
+            self.policy_profile.policy_revision,
+        ) {
+            return response;
+        }
+        self.update_transfer.phase = UpdateTransferPhase::ActivationPending;
+        let staged_index = self.staged_slot_index();
+        self.boot_slots[staged_index].slot_state = BootSlotState::StagedValidated;
+        self.accepted_firmware.trusted_boot_state = TrustedBootState::StagedValidating;
+        self.accepted_firmware.last_update_result = UpdateResultClass::Finalized;
+        let payload = encode_firmware_finalize_payload(FirmwareFinalizeResult {
+            staged_slot: self.boot_slots[staged_index].slot_id,
+            validated_version,
+            activation_pending: true,
+        });
+        status_response(StatusCode::Success, &payload)
+    }
+
+    fn handle_activate_firmware_update(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        let (_, inner) = match self.authorize_privileged_owned::<5>(
+            AuthorityRole::Administrator,
+            frame.payload.as_slice(),
+            5,
+            5,
+        ) {
+            Ok(values) => values,
+            Err(status) => return status_response(status, &[]),
+        };
+        let update_session_id = match decode_transition_request(inner.as_slice(), reactivate_marker()) {
+            Ok(value) => value,
+            Err(status) => return status_response(status, &[]),
+        };
+        if self.update_transfer.session_id != update_session_id
+            || self.update_transfer.phase != UpdateTransferPhase::ActivationPending
+        {
+            return status_response(StatusCode::StateError, &[]);
+        }
+        let approval_target = self.record.revision_counter();
+        if let Err(response) = self.maybe_create_or_confirm_approval(
+            ProtectedActionClass::FirmwareUpdate,
+            ApprovalTargetBinding::Device,
+            approval_target,
+            AuthorityRole::Administrator,
+            self.policy_profile.policy_revision,
+        ) {
+            return response;
+        }
+        let manifest = self.update_transfer.manifest.clone().unwrap_or_else(|| FirmwarePackageManifest {
+            manifest_version: UPDATE_MANIFEST_VERSION,
+            image_version: FirmwareVersion::default(),
+            image_size_bytes: 0,
+            image_digest_sha256: [0; 32],
+            target_slot_hint: self.accepted_firmware.active_slot.other(),
+            policy_flags: 0,
+            signature_algorithm: UPDATE_SIGNATURE_ALGORITHM_ED25519,
+            signature_bytes: Vec::new(),
+        });
+        let staged_index = self.staged_slot_index();
+        let active_index = self.active_slot_index();
+        self.boot_slots[active_index].slot_state = BootSlotState::Empty;
+        self.boot_slots[active_index].bootable = false;
+        self.boot_slots[active_index].trusted = false;
+        self.accepted_firmware.active_slot = self.boot_slots[staged_index].slot_id;
+        self.accepted_firmware.active_version = manifest.image_version;
+        self.accepted_firmware.minimum_accepted_version = manifest.image_version;
+        self.accepted_firmware.last_update_result = UpdateResultClass::Activated;
+        self.accepted_firmware.recovery_required = false;
+        self.accepted_firmware.trusted_boot_state = TrustedBootState::ActiveTrusted;
+        self.accepted_firmware.revision_counter =
+            self.accepted_firmware.revision_counter.saturating_add(1);
+        self.boot_slots[staged_index].slot_state = BootSlotState::ActiveTrusted;
+        self.boot_slots[staged_index].bootable = true;
+        self.boot_slots[staged_index].trusted = true;
+        self.update_transfer = UpdateTransferState::default();
+        self.consume_approval_ticket(
+            ProtectedActionClass::FirmwareUpdate,
+            ApprovalTargetBinding::Device,
+            approval_target,
+        );
+        let payload = encode_firmware_activation_payload(FirmwareActivationResult {
+            next_boot_slot: self.accepted_firmware.active_slot,
+            next_version: self.accepted_firmware.active_version,
+            reboot_required: true,
+        });
+        status_response(StatusCode::Success, &payload)
+    }
+
+    fn handle_abort_firmware_update(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        let (_, inner) = match self.authorize_any_owned::<4>(
+            &[AuthorityRole::Administrator, AuthorityRole::Recovery],
+            frame.payload.as_slice(),
+            4,
+            4,
+        ) {
+            Ok((request_counter, inner, _)) => (request_counter, inner),
+            Err(status) => return status_response(status, &[]),
+        };
+        let update_session_id = u32::from_le_bytes([inner[0], inner[1], inner[2], inner[3]]);
+        if self.update_transfer.session_id != update_session_id {
+            return status_response(StatusCode::StateError, &[]);
+        }
+        self.clear_update_transfer();
+        self.accepted_firmware.trusted_boot_state = TrustedBootState::ActiveTrusted;
+        self.accepted_firmware.last_update_result = UpdateResultClass::Aborted;
+        let payload = encode_firmware_abort_payload(FirmwareAbortResult {
+            transfer_state_cleared: true,
+            staged_slot_invalidated: true,
+        });
+        status_response(StatusCode::Success, &payload)
+    }
+
+    fn handle_recover_trusted_firmware(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        let (_, inner) = match self.authorize_privileged_owned::<1>(
+            AuthorityRole::Recovery,
+            frame.payload.as_slice(),
+            1,
+            1,
+        ) {
+            Ok(values) => values,
+            Err(status) => return status_response(status, &[]),
+        };
+        if let Err(status) = expect_single_marker(inner.as_slice(), recovery_marker()) {
+            return status_response(status, &[]);
+        }
+        let approval_target = self.record.revision_counter();
+        if let Err(response) = self.maybe_create_or_confirm_approval(
+            ProtectedActionClass::FirmwareUpdate,
+            ApprovalTargetBinding::Device,
+            approval_target,
+            AuthorityRole::Recovery,
+            self.policy_profile.policy_revision,
+        ) {
+            return response;
+        }
+        self.clear_update_transfer();
+        self.accepted_firmware.recovery_required = false;
+        self.accepted_firmware.last_update_result = UpdateResultClass::Recovered;
+        self.accepted_firmware.trusted_boot_state = TrustedBootState::ActiveTrusted;
+        self.recovery_state.reason = UpdateRecoveryReason::None;
+        self.recovery_state.staged_slot_present = false;
+        let restored = self.accepted_firmware.active_slot;
+        let active_index = self.active_slot_index();
+        self.boot_slots[active_index].slot_state = BootSlotState::ActiveTrusted;
+        self.boot_slots[active_index].bootable = true;
+        self.boot_slots[active_index].trusted = true;
+        self.consume_approval_ticket(
+            ProtectedActionClass::FirmwareUpdate,
+            ApprovalTargetBinding::Device,
+            approval_target,
+        );
+        let payload = encode_firmware_recovery_payload(FirmwareRecoveryResult {
+            restored_slot: restored,
+            restored_version: self.accepted_firmware.active_version,
+            recovery_required: false,
+        });
         status_response(StatusCode::Success, &payload)
     }
 
@@ -1262,6 +1746,10 @@ impl ProtocolEngine {
                     approval_target,
                 );
                 self.key_store = PersistentKeyStore::new(self.record.revision_counter());
+                self.accepted_firmware = AcceptedFirmwareState::default();
+                self.boot_slots = default_boot_slots(self.accepted_firmware);
+                self.update_transfer = UpdateTransferState::default();
+                self.recovery_state = RecoveryState::default();
                 self.audit_journal.record(
                     AuditEventClass::LifecycleTransition,
                     AuditEventCode::CommandCompleted,
@@ -1290,6 +1778,10 @@ impl ProtocolEngine {
         let payload = encode_developer_reset_payload(self.record.developer_reset());
         self.key_store = PersistentKeyStore::new(self.record.revision_counter());
         self.audit_journal = AuditJournal::new();
+        self.accepted_firmware = AcceptedFirmwareState::default();
+        self.boot_slots = default_boot_slots(self.accepted_firmware);
+        self.update_transfer = UpdateTransferState::default();
+        self.recovery_state = RecoveryState::default();
         self.record_audit_event(
             AuditEventClass::Administrative,
             AuditEventCode::CommandCompleted,
@@ -1740,6 +2232,10 @@ impl ProtocolEngine {
             &[action as u8],
         );
         status_response(StatusCode::Success, &[action as u8])
+    }
+
+    fn handle_developer_update_fault(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        self.handle_developer_store_fault(frame)
     }
 
     fn handle_developer_reboot(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {

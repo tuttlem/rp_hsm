@@ -86,3 +86,15 @@ mod audit_disclosure_controls;
 mod audit_fail_closed;
 #[path = "protocol/audit_surface_validation.rs"]
 mod audit_surface_validation;
+#[path = "protocol/update_fixtures.rs"]
+mod update_fixtures;
+#[path = "protocol/update_surface_validation.rs"]
+mod update_surface_validation;
+#[path = "protocol/update_authorization_flow.rs"]
+mod update_authorization_flow;
+#[path = "protocol/update_version_policy.rs"]
+mod update_version_policy;
+#[path = "protocol/update_recovery_flow.rs"]
+mod update_recovery_flow;
+#[path = "protocol/update_recovery_denials.rs"]
+mod update_recovery_denials;
