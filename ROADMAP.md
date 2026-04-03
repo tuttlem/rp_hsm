@@ -128,6 +128,35 @@ Only add crypto operations after the key model exists.
 - Add hash, HMAC, or KDF services only when they support real product use
   cases.
 
+Planned operation progression after `005-core-crypto-operations`:
+
+- `005` v1 crypto surface remains intentionally narrow:
+  - managed `Ed25519` signing
+  - public detached verification for `Ed25519` and `P-256`
+  - bounded random-byte generation
+  - wrapped key import only
+- Post-`005` first-tier additions should focus on architecture-bearing services:
+  - `AES-256-GCM`
+  - `HMAC-SHA-256`
+  - `SHA-256`
+  - `HKDF-SHA-256`
+  - `ECDSA P-256` signing
+  - `ECDH P-256`
+- Post-`005` second-tier additions are acceptable only after policy, audit, and
+  operator tooling are mature enough to support them safely:
+  - AES key wrap
+  - AES-CMAC
+  - `SHA-384`
+  - `ECDSA P-384`
+  - `Ed25519` public-key verification and compatibility extensions beyond the
+    initial signing path
+  - `X25519`
+- Explicitly excluded from near-term scope unless a later spec justifies them:
+  - plaintext key export
+  - general-purpose decrypt/encrypt helpers without a clear custody use case
+  - RSA key management and RSA signing
+  - password-oriented services such as `PBKDF2`
+
 Exit criteria:
 
 - Every crypto operation maps to explicit permissions and key usage flags.
@@ -203,7 +232,14 @@ Exit criteria:
 
 The device is not complete without the software around it.
 
-- Build a CLI for provisioning, admin operations, and diagnostics.
+- Build a Unix-style CLI for provisioning, admin operations, diagnostics, and
+  cryptographic data flows.
+- Define a device-discovery command such as `rphsmtool find` and a consistent
+  `--device` selection model so users do not need to know transport details
+  when only one HSM is present.
+- Make stdin/stdout-oriented commands the default user surface for operations
+  such as random generation, signing, and later symmetric encryption and
+  decryption.
 - Build a host SDK or a narrowly scoped client library.
 - Add protocol conformance tests.
 - Add manufacturing and provisioning tools.
