@@ -149,6 +149,102 @@ sudo usermod -aG uucp $USER
 
 If your system shows a different group on `/dev/ttyACM0`, use that group instead.
 
+### Run `rphsmtool`
+
+`rphsmtool` is the user-facing CLI. It keeps stdout result-only, stderr
+diagnostic-only, and hides protocol framing, counters, and session setup from
+operators.
+
+Run it directly:
+
+```bash
+cargo run -p host_tools --bin rphsmtool -- find
+```
+
+Alias form:
+
+```bash
+cargo rphsmtool find
+```
+
+Typical commands:
+
+```bash
+cargo rphsmtool find
+cargo rphsmtool status --device /dev/ttyACM0
+cargo rphsmtool developer-reset --device /dev/ttyACM0
+cargo rphsmtool developer-reboot --device /dev/ttyACM0
+cargo rphsmtool developer-store-fault --device /dev/ttyACM0 --action rollback-persisted-store
+cargo rphsmtool provision-bootstrap --device /dev/ttyACM0 --proof-env RPHSM_PROOF
+cargo rphsmtool auth-check --device /dev/ttyACM0 --role administrator --proof-env RPHSM_PROOF
+cargo rphsmtool lock --device /dev/ttyACM0 --role administrator --proof-env RPHSM_PROOF
+cargo rphsmtool unlock --device /dev/ttyACM0 --role administrator --proof-env RPHSM_PROOF
+cargo rphsmtool zeroize --device /dev/ttyACM0 --role administrator --proof-env RPHSM_PROOF
+cargo rphsmtool logout --device /dev/ttyACM0 --role administrator --proof-env RPHSM_PROOF
+cargo rphsmtool enter-recovery --device /dev/ttyACM0 --role recovery --proof-env RPHSM_PROOF
+cargo rphsmtool recover-to-provisioned --device /dev/ttyACM0 --role recovery --proof-env RPHSM_PROOF
+cargo rphsmtool reactivate-recovered --device /dev/ttyACM0 --transition-id 7 --role recovery --proof-env RPHSM_PROOF
+cargo rphsmtool get-random --device /dev/ttyACM0 --bytes 32 --role administrator --proof-env RPHSM_PROOF
+cargo rphsmtool sign --device /dev/ttyACM0 --key-id 1 --role key-manager --proof-env RPHSM_PROOF < message.bin > signature.bin
+cargo rphsmtool verify --device /dev/ttyACM0 --algorithm ed25519 --public-key-hex <HEX> --signature-hex <HEX> < message.bin
+cargo rphsmtool import-wrapped-key --device /dev/ttyACM0 --role key-manager --proof-env RPHSM_PROOF < envelope.bin
+cargo rphsmtool list-keys --device /dev/ttyACM0 --role key-manager --proof-env RPHSM_PROOF
+cargo rphsmtool get-key-metadata --device /dev/ttyACM0 --key-id 1 --role key-manager --proof-env RPHSM_PROOF
+cargo rphsmtool revoke-key --device /dev/ttyACM0 --key-id 1 --role key-manager --proof-env RPHSM_PROOF
+cargo rphsmtool destroy-key --device /dev/ttyACM0 --key-id 1 --role key-manager --proof-env RPHSM_PROOF
+```
+
+Behavior:
+
+- `find` enumerates compatible RP HSM devices only.
+- `developer-reset` returns a developer-mode lab device to `factory` so fresh
+  bootstrap workflows can be rerun.
+- `developer-reboot` and `developer-store-fault` are exposed for lab validation
+  and only succeed when the connected firmware includes the developer-only
+  command set.
+- `provision-bootstrap` performs the reviewed bootstrap auth plus begin/finalize
+  provisioning flow needed to move a factory-state device into a usable state.
+- `auth-check` verifies that a reviewed role can authenticate successfully
+  without requiring users to construct protocol frames manually.
+- `lock`, `unlock`, `zeroize`, `logout`, recovery transitions, `sign`,
+  `verify`, `import-wrapped-key`, `revoke-key`, and `destroy-key` all map to
+  already-implemented firmware operations.
+- If `--device` is omitted, `rphsmtool` auto-selects only when exactly one
+  compatible device is present.
+- If multiple compatible devices are present, the command fails closed and
+  requires `--device`.
+- `get-random` writes raw bytes to stdout and sends any diagnostics to stderr.
+- `sign` writes raw signature bytes to stdout.
+- `verify` reads the message from stdin and writes `true` or `false` to stdout.
+- Authentication proof input is taken from `--proof-env <VAR>` to avoid putting
+  proof material into shell history.
+- Reserved future verbs such as `sym-encrypt` and `sym-decrypt` fail explicitly
+  instead of pretending to work before the firmware supports them.
+
+Examples:
+
+```bash
+cargo rphsmtool developer-reset --device /dev/ttyACM0
+```
+
+```bash
+export RPHSM_PROOF=BOOT
+cargo rphsmtool provision-bootstrap --device /dev/ttyACM0 --proof-env RPHSM_PROOF
+```
+
+```bash
+export RPHSM_PROOF=ADMIN
+cargo rphsmtool get-random --device /dev/ttyACM0 --bytes 16 --role administrator --proof-env RPHSM_PROOF > random.bin
+```
+
+```bash
+cargo rphsmtool find
+```
+
+If serial permissions require a group such as `uucp`, run the command from a
+shell with that group applied or after logging back in with updated group
+membership.
+
 ### Test the protocol crate
 
 Run protocol tests on the host target:
@@ -191,6 +287,7 @@ Defined in [.cargo/config.toml](/home/michael/src/embedded/rp_hsm/.cargo/config.
 - `cargo firmware-run`
 - `cargo firmware-run-developer`
 - `cargo probe -- ...`
+- `cargo rphsmtool ...`
 
 ## Maintenance Rule
 

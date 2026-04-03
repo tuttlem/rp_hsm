@@ -232,7 +232,14 @@ Exit criteria:
 
 The device is not complete without the software around it.
 
-- Build a CLI for provisioning, admin operations, and diagnostics.
+- Build a Unix-style CLI for provisioning, admin operations, diagnostics, and
+  cryptographic data flows.
+- Define a device-discovery command such as `rphsmtool find` and a consistent
+  `--device` selection model so users do not need to know transport details
+  when only one HSM is present.
+- Make stdin/stdout-oriented commands the default user surface for operations
+  such as random generation, signing, and later symmetric encryption and
+  decryption.
 - Build a host SDK or a narrowly scoped client library.
 - Add protocol conformance tests.
 - Add manufacturing and provisioning tools.
