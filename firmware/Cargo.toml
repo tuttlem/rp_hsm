@@ -1,0 +1,34 @@
+[package]
+name = "firmware"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rp_hsm"
+path = "src/main.rs"
+test = false
+bench = false
+
+[features]
+default = []
+developer-mode = []
+
+[dependencies]
+critical-section = "1.2.0"
+embedded-hal = "1.0.0"
+heapless = "0.8.0"
+panic-halt = "1.0.0"
+protocol = { package = "rp_hsm", path = "../protocol" }
+rand_core = "0.6.4"
+rp-binary-info = "0.1.0"
+rp235x-hal = { git = "https://github.com/rp-rs/rp-hal", version = "0.4.0", features = [
+    "binary-info",
+    "critical-section-impl",
+    "rt",
+    "defmt",
+] }
+usb-device = "0.3.2"
+usbd-serial = "0.2.2"
+
+[lints]
+workspace = true
