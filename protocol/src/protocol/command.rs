@@ -30,6 +30,7 @@ pub enum CommandId {
     VerifyDetached = 0x0b,
     GetHealthStatus = 0x0c,
     GetAuditPage = 0x0d,
+    ListAlgorithms = 0x0e,
     BeginProvisioning = 0x80,
     FinalizeProvisioning = 0x81,
     LockDevice = 0x82,
@@ -62,6 +63,7 @@ pub enum CommandId {
     AbortFirmwareUpdate = 0x9d,
     RecoverTrustedFirmware = 0x9e,
     DeveloperUpdateFault = 0x9f,
+    GenerateKey = 0xa0,
 }
 
 impl CommandId {
@@ -81,6 +83,7 @@ impl CommandId {
             0x0b => Some(Self::VerifyDetached),
             0x0c => Some(Self::GetHealthStatus),
             0x0d => Some(Self::GetAuditPage),
+            0x0e => Some(Self::ListAlgorithms),
             0x80 => Some(Self::BeginProvisioning),
             0x81 => Some(Self::FinalizeProvisioning),
             0x82 => Some(Self::LockDevice),
@@ -113,6 +116,7 @@ impl CommandId {
             0x9d => Some(Self::AbortFirmwareUpdate),
             0x9e => Some(Self::RecoverTrustedFirmware),
             0x9f => Some(Self::DeveloperUpdateFault),
+            0xa0 => Some(Self::GenerateKey),
             _ => None,
         }
     }
@@ -339,6 +343,21 @@ pub const VERIFY_DETACHED: CommandDefinition = CommandDefinition {
 pub const GET_HEALTH_STATUS: CommandDefinition = CommandDefinition {
     id: CommandId::GetHealthStatus,
     family: CommandFamily::Status,
+    min_payload_len: 0,
+    max_payload_len: 0,
+    allowed_device_states: CATALOG_STATES,
+    required_role: AuthorityRole::Public,
+    replay_policy: ReplayPolicy::Repeatable,
+    idempotency_policy: IdempotencyPolicy::Idempotent,
+    enabled: true,
+    developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
+};
+
+pub const LIST_ALGORITHMS: CommandDefinition = CommandDefinition {
+    id: CommandId::ListAlgorithms,
+    family: CommandFamily::Discovery,
     min_payload_len: 0,
     max_payload_len: 0,
     allowed_device_states: CATALOG_STATES,
@@ -636,6 +655,21 @@ pub const SIGN_DETACHED: CommandDefinition = CommandDefinition {
     protected_action_class: ProtectedActionClass::None,
 };
 
+pub const GENERATE_KEY: CommandDefinition = CommandDefinition {
+    id: CommandId::GenerateKey,
+    family: CommandFamily::Crypto,
+    min_payload_len: AUTH_HEADER_LEN + 2,
+    max_payload_len: AUTH_HEADER_LEN + 2,
+    allowed_device_states: OPERATIONAL_ONLY,
+    required_role: AuthorityRole::KeyManager,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+    requires_key_context: false,
+    protected_action_class: ProtectedActionClass::None,
+};
+
 pub const GENERATE_RANDOM: CommandDefinition = CommandDefinition {
     id: CommandId::GenerateRandom,
     family: CommandFamily::Crypto,
@@ -684,13 +718,13 @@ pub const EXPORT_WRAPPED_KEY: CommandDefinition = CommandDefinition {
 pub const ENCRYPT: CommandDefinition = CommandDefinition {
     id: CommandId::Encrypt,
     family: CommandFamily::Crypto,
-    min_payload_len: AUTH_HEADER_LEN,
-    max_payload_len: AUTH_HEADER_LEN,
+    min_payload_len: AUTH_HEADER_LEN + 1 + 1 + 2 + 1,
+    max_payload_len: AUTH_HEADER_LEN + 1 + 1 + 2 + 128,
     allowed_device_states: OPERATIONAL_ONLY,
     required_role: AuthorityRole::KeyManager,
     replay_policy: ReplayPolicy::SingleUse,
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
-    enabled: false,
+    enabled: true,
     developer_only: false,
     requires_key_context: true,
     protected_action_class: ProtectedActionClass::None,
@@ -699,13 +733,13 @@ pub const ENCRYPT: CommandDefinition = CommandDefinition {
 pub const DECRYPT: CommandDefinition = CommandDefinition {
     id: CommandId::Decrypt,
     family: CommandFamily::Crypto,
-    min_payload_len: AUTH_HEADER_LEN,
-    max_payload_len: AUTH_HEADER_LEN,
+    min_payload_len: AUTH_HEADER_LEN + 1 + 1 + 1 + 12 + 2 + 1,
+    max_payload_len: AUTH_HEADER_LEN + 1 + 1 + 1 + 12 + 2 + 144,
     allowed_device_states: OPERATIONAL_ONLY,
     required_role: AuthorityRole::KeyManager,
     replay_policy: ReplayPolicy::SingleUse,
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
-    enabled: false,
+    enabled: true,
     developer_only: false,
     requires_key_context: true,
     protected_action_class: ProtectedActionClass::None,
@@ -863,6 +897,7 @@ pub const PUBLIC_COMMANDS: &[CommandDefinition] = &[
     GET_CRYPTO_CAPABILITIES,
     VERIFY_DETACHED,
     GET_HEALTH_STATUS,
+    LIST_ALGORITHMS,
 ];
 
 pub fn lookup_command(id: u8) -> Option<CommandDefinition> {
@@ -885,6 +920,7 @@ pub fn definition_for(id: CommandId) -> CommandDefinition {
         CommandId::VerifyDetached => VERIFY_DETACHED,
         CommandId::GetHealthStatus => GET_HEALTH_STATUS,
         CommandId::GetAuditPage => GET_AUDIT_PAGE,
+        CommandId::ListAlgorithms => LIST_ALGORITHMS,
         CommandId::BeginProvisioning => BEGIN_PROVISIONING,
         CommandId::FinalizeProvisioning => FINALIZE_PROVISIONING,
         CommandId::LockDevice => LOCK_DEVICE,
@@ -903,6 +939,7 @@ pub fn definition_for(id: CommandId) -> CommandDefinition {
         CommandId::DeveloperReboot => DEVELOPER_REBOOT,
         CommandId::DeveloperSetPolicy => DEVELOPER_SET_POLICY,
         CommandId::SignDetached => SIGN_DETACHED,
+        CommandId::GenerateKey => GENERATE_KEY,
         CommandId::GenerateRandom => GENERATE_RANDOM,
         CommandId::ImportWrappedKey => IMPORT_WRAPPED_KEY,
         CommandId::ExportWrappedKey => EXPORT_WRAPPED_KEY,
@@ -954,6 +991,7 @@ pub fn get_visible_catalog(
             GET_CRYPTO_CAPABILITIES,
             VERIFY_DETACHED,
             GET_HEALTH_STATUS,
+            LIST_ALGORITHMS,
             INVALIDATE_SESSION,
             BEGIN_PROVISIONING,
             FINALIZE_PROVISIONING,
@@ -970,6 +1008,7 @@ pub fn get_visible_catalog(
             GET_CRYPTO_CAPABILITIES,
             VERIFY_DETACHED,
             GET_HEALTH_STATUS,
+            LIST_ALGORITHMS,
             INVALIDATE_SESSION,
             GET_AUDIT_PAGE,
             GET_FIRMWARE_UPDATE_STATUS,
@@ -995,6 +1034,7 @@ pub fn get_visible_catalog(
             GET_CRYPTO_CAPABILITIES,
             VERIFY_DETACHED,
             GET_HEALTH_STATUS,
+            LIST_ALGORITHMS,
             INVALIDATE_SESSION,
             GET_AUDIT_PAGE,
             GET_FIRMWARE_UPDATE_STATUS,
@@ -1018,6 +1058,7 @@ pub fn get_visible_catalog(
                     GET_CRYPTO_CAPABILITIES,
                     VERIFY_DETACHED,
                     GET_HEALTH_STATUS,
+                    LIST_ALGORITHMS,
                     GET_AUDIT_PAGE,
                     GET_FIRMWARE_UPDATE_STATUS,
                     BEGIN_FIRMWARE_UPDATE,
@@ -1048,15 +1089,19 @@ pub fn get_visible_catalog(
             GET_CRYPTO_CAPABILITIES,
             VERIFY_DETACHED,
             GET_HEALTH_STATUS,
+            LIST_ALGORITHMS,
             INVALIDATE_SESSION,
             PUT_PERSISTENT_KEY,
             LIST_PERSISTENT_KEYS,
             GET_KEY_METADATA,
             REVOKE_PERSISTENT_KEY,
             DESTROY_PERSISTENT_KEY,
+            GENERATE_KEY,
             SIGN_DETACHED,
             GENERATE_RANDOM,
             IMPORT_WRAPPED_KEY,
+            ENCRYPT,
+            DECRYPT,
             GET_FIRMWARE_UPDATE_STATUS,
         ]),
     }

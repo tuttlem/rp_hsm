@@ -5,19 +5,21 @@ use super::frame::{
     RESERVED_FLAG_MASK,
 };
 use super::state::{
-    ApprovalTicket, AuditEvent, AuditRetrievalCursor, AuthorityRole, BeginFirmwareUpdateRequest,
-    BootSlotId, CryptoCapabilities, DenialClass, DeveloperResetOutcome, DeviceState,
+    AlgorithmProfile, ApprovalTicket,
+    AuditEvent, AuditRetrievalCursor, AuthorityRole, BeginFirmwareUpdateRequest, BootSlotId,
+    CHACHA20POLY1305_NONCE_LEN, CryptoCapabilities, DecryptRequest, DecryptResponse,
+    DenialClass, DeveloperResetOutcome, DeviceState, EncryptRequest, EncryptResponse,
     ExportPolicy, FirmwareAbortResult, FirmwareActivationResult, FirmwareChunkProgress,
-    FirmwareChunkRequest, FirmwareFinalizeResult, FirmwarePackageManifest,
-    FirmwareRecoveryResult, FirmwareUpdateBeginResult, FirmwareUpdateStatus, FirmwareVersion,
+    FirmwareChunkRequest, FirmwareFinalizeResult, FirmwarePackageManifest, FirmwareRecoveryResult,
+    FirmwareUpdateBeginResult, FirmwareUpdateStatus, FirmwareVersion, GenerateKeyRequest,
     HealthStatusView, ImportWrappedKeyRequest, KeyAlgorithm, KeyDestroyResult, KeyListEntry,
     KeyMaterialEnvelope, KeyMetadataView, KeyOrigin, KeyRecordResult, KeyStoreStatus,
-    LifecycleStatus, LockResult, MAX_CRYPTO_MESSAGE_LEN, MAX_FIRMWARE_CHUNK_LEN,
-    MAX_FIRMWARE_SIGNATURE_LEN, MAX_RANDOM_OUTPUT_LEN, MAX_SIGNATURE_LEN,
-    MAX_WRAPPED_CIPHERTEXT_LEN, MAX_WRAPPED_TAG_LEN, P256_PUBLIC_KEY_LEN, PolicyProfile,
-    PutPersistentKeyRequest, RandomRequest, RecoveryResult, SessionState, SessionStatus,
-    SignRequest, StateRevision, TransitionResult, UPDATE_MANIFEST_VERSION, VerifyRequest,
-    ZeroizeOutcome,
+    LifecycleStatus, LockResult, MAX_ALGORITHM_PROFILES, MAX_CIPHERTEXT_LEN,
+    MAX_CRYPTO_MESSAGE_LEN, MAX_FIRMWARE_CHUNK_LEN, MAX_FIRMWARE_SIGNATURE_LEN,
+    MAX_RANDOM_OUTPUT_LEN, MAX_SIGNATURE_LEN, MAX_WRAPPED_CIPHERTEXT_LEN, MAX_WRAPPED_TAG_LEN,
+    P256_PUBLIC_KEY_LEN, PolicyProfile, PutPersistentKeyRequest, RandomRequest, RecoveryResult,
+    SessionState, SessionStatus, SignRequest, StateRevision, TransitionResult,
+    UPDATE_MANIFEST_VERSION, VerifyRequest, ZeroizeOutcome,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -370,20 +372,21 @@ pub fn encode_key_record_result_payload(result: KeyRecordResult) -> [u8; 10] {
 }
 
 #[must_use]
-pub fn encode_key_metadata_payload(view: KeyMetadataView) -> [u8; 10] {
+pub fn encode_key_metadata_payload(view: &KeyMetadataView) -> Option<Vec<u8, MAX_PAYLOAD_LEN>> {
     let record_revision = view.record_revision.to_le_bytes();
-    [
-        view.key_id,
-        view.algorithm as u8,
-        view.origin as u8,
-        view.usage_mask,
-        view.export_policy as u8,
-        view.lifecycle_state as u8,
-        record_revision[0],
-        record_revision[1],
-        record_revision[2],
-        record_revision[3],
-    ]
+    let mut payload = Vec::new();
+    payload.push(view.key_id).ok()?;
+    payload.push(view.algorithm as u8).ok()?;
+    payload.push(view.origin as u8).ok()?;
+    payload.push(view.usage_mask).ok()?;
+    payload.push(view.export_policy as u8).ok()?;
+    payload.push(view.lifecycle_state as u8).ok()?;
+    payload.extend_from_slice(&record_revision).ok()?;
+    payload
+        .push(u8::try_from(view.public_material.len()).ok()?)
+        .ok()?;
+    payload.extend_from_slice(view.public_material.as_slice()).ok()?;
+    Some(payload)
 }
 
 #[must_use]
@@ -427,6 +430,23 @@ pub fn encode_crypto_capabilities_payload(
         capabilities.max_random_len,
         u8::from(capabilities.wrapped_import_enabled),
     ]
+}
+
+#[must_use]
+pub fn encode_algorithm_profiles_payload(
+    profiles: &[AlgorithmProfile],
+) -> Option<Vec<u8, MAX_PAYLOAD_LEN>> {
+    if profiles.len() > MAX_ALGORITHM_PROFILES {
+        return None;
+    }
+    let mut payload = Vec::new();
+    payload.push(u8::try_from(profiles.len()).ok()?).ok()?;
+    for profile in profiles {
+        payload.push(profile.algorithm as u8).ok()?;
+        payload.push(profile.operation_mask).ok()?;
+        payload.push(profile.public_material_len).ok()?;
+    }
+    Some(payload)
 }
 
 #[must_use]
@@ -654,6 +674,55 @@ pub fn encode_random_payload(bytes: &[u8]) -> Option<Vec<u8, MAX_PAYLOAD_LEN>> {
     Some(payload)
 }
 
+#[must_use]
+pub fn encode_encrypt_response_payload(
+    response: &EncryptResponse,
+) -> Option<Vec<u8, MAX_PAYLOAD_LEN>> {
+    let mut payload = Vec::new();
+    payload
+        .push(u8::try_from(response.nonce.len()).ok()?)
+        .ok()?;
+    payload.extend_from_slice(response.nonce.as_slice()).ok()?;
+    payload
+        .extend_from_slice(
+            &u16::try_from(response.ciphertext.len())
+                .ok()?
+                .to_le_bytes(),
+        )
+        .ok()?;
+    payload.extend_from_slice(response.ciphertext.as_slice()).ok()?;
+    Some(payload)
+}
+
+#[must_use]
+pub fn encode_decrypt_response_payload(
+    response: &DecryptResponse,
+) -> Option<Vec<u8, MAX_PAYLOAD_LEN>> {
+    let mut payload = Vec::new();
+    payload
+        .extend_from_slice(
+            &u16::try_from(response.plaintext.len())
+                .ok()?
+                .to_le_bytes(),
+        )
+        .ok()?;
+    payload.extend_from_slice(response.plaintext.as_slice()).ok()?;
+    Some(payload)
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the generate-key request is malformed.
+pub fn decode_generate_key_request(payload: &[u8]) -> Result<GenerateKeyRequest, StatusCode> {
+    if payload.len() != 2 {
+        return Err(StatusCode::ValidationError);
+    }
+    Ok(GenerateKeyRequest {
+        algorithm: KeyAlgorithm::from_byte(payload[0]).ok_or(StatusCode::ValidationError)?,
+        usage_mask: payload[1],
+    })
+}
+
 /// # Errors
 ///
 /// Returns `StatusCode::ValidationError` when the signing request shape is malformed.
@@ -746,6 +815,76 @@ pub fn decode_random_request(payload: &[u8]) -> Result<RandomRequest, StatusCode
         return Err(StatusCode::ValidationError);
     }
     Ok(RandomRequest { requested_len })
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the encrypt request shape is malformed.
+pub fn decode_encrypt_request(payload: &[u8]) -> Result<EncryptRequest, StatusCode> {
+    if payload.len() < 4 {
+        return Err(StatusCode::ValidationError);
+    }
+    let key_id = payload[0];
+    let algorithm = KeyAlgorithm::from_byte(payload[1]).ok_or(StatusCode::ValidationError)?;
+    let plaintext_len = usize::from(u16::from_le_bytes([payload[2], payload[3]]));
+    if plaintext_len == 0
+        || plaintext_len > MAX_CRYPTO_MESSAGE_LEN
+        || payload.len() != 4 + plaintext_len
+    {
+        return Err(StatusCode::ValidationError);
+    }
+    let mut plaintext = Vec::<u8, MAX_CRYPTO_MESSAGE_LEN>::new();
+    plaintext
+        .extend_from_slice(&payload[4..])
+        .map_err(|()| StatusCode::ValidationError)?;
+    Ok(EncryptRequest {
+        key_id,
+        algorithm,
+        plaintext,
+    })
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the decrypt request shape is malformed.
+pub fn decode_decrypt_request(payload: &[u8]) -> Result<DecryptRequest, StatusCode> {
+    if payload.len() < 6 {
+        return Err(StatusCode::ValidationError);
+    }
+    let key_id = payload[0];
+    let algorithm = KeyAlgorithm::from_byte(payload[1]).ok_or(StatusCode::ValidationError)?;
+    let nonce_len = usize::from(payload[2]);
+    if nonce_len != CHACHA20POLY1305_NONCE_LEN {
+        return Err(StatusCode::ValidationError);
+    }
+    let ciphertext_len_index = 3 + nonce_len;
+    if payload.len() < ciphertext_len_index + 2 {
+        return Err(StatusCode::ValidationError);
+    }
+    let ciphertext_len = usize::from(u16::from_le_bytes([
+        payload[ciphertext_len_index],
+        payload[ciphertext_len_index + 1],
+    ]));
+    if ciphertext_len <= CHACHA20POLY1305_NONCE_LEN
+        || ciphertext_len > MAX_CIPHERTEXT_LEN
+        || payload.len() != ciphertext_len_index + 2 + ciphertext_len
+    {
+        return Err(StatusCode::ValidationError);
+    }
+    let mut nonce = Vec::<u8, CHACHA20POLY1305_NONCE_LEN>::new();
+    nonce
+        .extend_from_slice(&payload[3..3 + nonce_len])
+        .map_err(|()| StatusCode::ValidationError)?;
+    let mut ciphertext = Vec::<u8, MAX_CIPHERTEXT_LEN>::new();
+    ciphertext
+        .extend_from_slice(&payload[ciphertext_len_index + 2..])
+        .map_err(|()| StatusCode::ValidationError)?;
+    Ok(DecryptRequest {
+        key_id,
+        algorithm,
+        nonce,
+        ciphertext,
+    })
 }
 
 /// # Errors

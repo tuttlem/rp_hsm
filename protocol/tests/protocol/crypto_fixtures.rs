@@ -7,8 +7,8 @@ use chacha20poly1305::{
 use ed25519_dalek::{Signer, Verifier};
 use rp_hsm::protocol::{
     DeviceState, ExportPolicy, KeyAlgorithm, KeyOrigin, MessageKind, ProtocolEngine, ProtocolFrame,
-    SessionState, StatusCode, USAGE_SIGN, USAGE_WRAP_IMPORT, decode_frame,
-    ed25519_public_key_from_seed, encode_frame,
+    SessionState, StatusCode, USAGE_DECRYPT, USAGE_ENCRYPT, USAGE_SIGN, USAGE_WRAP_IMPORT,
+    decode_frame, ed25519_public_key_from_seed, encode_frame,
 };
 
 pub const ED25519_SEED: [u8; 32] = *b"0123456789abcdef0123456789abcdef";
@@ -114,7 +114,7 @@ pub fn install_wrap_key(
         session_id,
         counter,
         key_id,
-        KeyAlgorithm::Aes256,
+        KeyAlgorithm::ChaCha20Poly1305,
         KeyOrigin::Generated,
         USAGE_WRAP_IMPORT,
         ExportPolicy::NonExportable,
@@ -127,11 +127,12 @@ pub fn sign_request(
     session_id: [u8; 4],
     counter: u32,
     key_id: u8,
+    algorithm: KeyAlgorithm,
     message: &[u8],
 ) -> std::vec::Vec<u8> {
     let mut inner = std::vec::Vec::from([
         key_id,
-        KeyAlgorithm::Ed25519 as u8,
+        algorithm as u8,
         u8::try_from(message.len() & 0xff).unwrap_or(0),
         u8::try_from((message.len() >> 8) & 0xff).unwrap_or(0),
     ]);
@@ -160,6 +161,55 @@ pub fn verify_request(
 
 pub fn random_request(session_id: [u8; 4], counter: u32, requested_len: u8) -> std::vec::Vec<u8> {
     request(0x91, 0x02, &authorized(session_id, counter, &[requested_len]))
+}
+
+pub fn list_algorithms_request() -> std::vec::Vec<u8> {
+    request(0x0e, 0x00, &[])
+}
+
+pub fn generate_key_request(
+    session_id: [u8; 4],
+    counter: u32,
+    algorithm: KeyAlgorithm,
+    usage_mask: u8,
+) -> std::vec::Vec<u8> {
+    request(0xa0, 0x02, &authorized(session_id, counter, &[algorithm as u8, usage_mask]))
+}
+
+pub fn sym_encrypt_request(
+    session_id: [u8; 4],
+    counter: u32,
+    key_id: u8,
+    algorithm: KeyAlgorithm,
+    plaintext: &[u8],
+) -> std::vec::Vec<u8> {
+    let mut inner = std::vec::Vec::from([
+        key_id,
+        algorithm as u8,
+        u8::try_from(message_len_low(plaintext.len())).unwrap_or(0),
+        u8::try_from(message_len_high(plaintext.len())).unwrap_or(0),
+    ]);
+    inner.extend_from_slice(plaintext);
+    request(0x94, 0x02, &authorized(session_id, counter, &inner))
+}
+
+pub fn sym_decrypt_request(
+    session_id: [u8; 4],
+    counter: u32,
+    key_id: u8,
+    algorithm: KeyAlgorithm,
+    nonce: &[u8],
+    ciphertext: &[u8],
+) -> std::vec::Vec<u8> {
+    let mut inner = std::vec::Vec::from([
+        key_id,
+        algorithm as u8,
+        u8::try_from(nonce.len()).unwrap_or(0),
+    ]);
+    inner.extend_from_slice(nonce);
+    inner.extend_from_slice(&u16::try_from(ciphertext.len()).unwrap_or(0).to_le_bytes());
+    inner.extend_from_slice(ciphertext);
+    request(0x95, 0x02, &authorized(session_id, counter, &inner))
 }
 
 pub fn wrapped_import_request(
@@ -211,3 +261,13 @@ pub fn sign_message_with_seed(message: &[u8]) -> [u8; 64] {
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&ED25519_SEED);
     signing_key.sign(message).to_bytes()
 }
+
+fn message_len_low(len: usize) -> usize {
+    len & 0xff
+}
+
+fn message_len_high(len: usize) -> usize {
+    (len >> 8) & 0xff
+}
+
+pub const GENERATED_SYM_USAGE: u8 = USAGE_ENCRYPT | USAGE_DECRYPT;

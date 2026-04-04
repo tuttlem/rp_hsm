@@ -102,7 +102,7 @@ fn main() -> Result<(), DynError> {
         key_manager,
         6,
         0x07,
-        KeyAlgorithm::Aes256 as u8,
+        KeyAlgorithm::ChaCha20Poly1305 as u8,
         &WRAP_KEY,
     )?;
     import_wrapped_key(&mut *port, key_manager, 7, 0x07, &ED25519_SEED)?;

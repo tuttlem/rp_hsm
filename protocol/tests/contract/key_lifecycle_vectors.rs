@@ -30,7 +30,7 @@ fn destroy_vector_returns_completion_flags() {
     let mut engine = operational_engine();
     let _ = engine.handle_bytes(&put_key_request(
         0x03,
-        rp_hsm::protocol::KeyAlgorithm::Aes256,
+        rp_hsm::protocol::KeyAlgorithm::ChaCha20Poly1305,
         rp_hsm::protocol::KeyOrigin::Generated,
         USAGE_SIGN,
         rp_hsm::protocol::ExportPolicy::NonExportable,

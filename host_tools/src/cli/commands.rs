@@ -1,7 +1,10 @@
 use crate::cli::args::{AuthOptions, CommandSpec, ParsedArgs};
 use crate::cli::device::{DiscoveredDevice, discover_devices, resolve_device_selector};
 use crate::cli::output::{CliError, CommandOutput, audit_page_lines, lines_output};
-use crate::client::{FirmwareVersionInput, KeyListRecord, SerialBackend, SessionContext, StatusReport};
+use crate::client::{
+    AlgorithmProfileRecord, FirmwareVersionInput, KeyListRecord, KeyMetadataRecord,
+    SerialBackend, SessionContext, StatusReport,
+};
 use std::io::Read;
 
 /// # Errors
@@ -26,6 +29,18 @@ pub fn execute(parsed: ParsedArgs) -> Result<CommandOutput, CliError> {
             let report = SerialBackend::new(crate::client::ClientConfig::new(selected, parsed.global.baud))
                 .status_report()?;
             Ok(lines_output(&format_status(&report)))
+        }
+        CommandSpec::ListAlgorithms => {
+            let devices = discover_devices(parsed.global.baud)?;
+            let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
+            let algorithms = SerialBackend::new(crate::client::ClientConfig::new(selected, parsed.global.baud))
+                .list_algorithms()?;
+            Ok(lines_output(
+                &algorithms
+                    .iter()
+                    .map(format_algorithm_profile)
+                    .collect::<Vec<_>>(),
+            ))
         }
         CommandSpec::UpdateStatus { auth } => {
             let proof = load_proof(&auth)?;
@@ -283,6 +298,42 @@ pub fn execute(parsed: ParsedArgs) -> Result<CommandOutput, CliError> {
                 .get_random(auth.role, &proof, bytes)?;
             Ok(CommandOutput::Bytes(bytes))
         }
+        CommandSpec::GenerateKey { algorithm, usage, auth } => {
+            let proof = load_proof(&auth)?;
+            let usage_mask = parse_usage_mask(&usage)?;
+            let devices = discover_devices(parsed.global.baud)?;
+            let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
+            let result = SerialBackend::new(crate::client::ClientConfig::new(selected.clone(), parsed.global.baud))
+                .generate_key(&proof, algorithm, usage_mask)?;
+            Ok(lines_output(&[
+                format!("device={selected}"),
+                format!("key_id={}", result.key_id),
+                format!("algorithm={}", algorithm_name(algorithm as u8)),
+                format!("usage_mask=0x{usage_mask:02x}"),
+                format!("lifecycle={}", key_lifecycle_name(result.lifecycle_state)),
+                format!("record_revision={}", result.record_revision),
+                format!("store_revision={}", result.store_revision),
+            ]))
+        }
+        CommandSpec::SymEncrypt { key_id, algorithm, auth } => {
+            let proof = load_proof(&auth)?;
+            let plaintext = read_stdin_required()?;
+            let devices = discover_devices(parsed.global.baud)?;
+            let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
+            let result = SerialBackend::new(crate::client::ClientConfig::new(selected, parsed.global.baud))
+                .sym_encrypt(&proof, key_id, algorithm, &plaintext)?;
+            Ok(CommandOutput::Bytes(encode_symmetric_blob(&result.nonce, &result.ciphertext)?))
+        }
+        CommandSpec::SymDecrypt { key_id, algorithm, auth } => {
+            let proof = load_proof(&auth)?;
+            let blob = read_stdin_required()?;
+            let (nonce, ciphertext) = decode_symmetric_blob(&blob)?;
+            let devices = discover_devices(parsed.global.baud)?;
+            let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
+            let plaintext = SerialBackend::new(crate::client::ClientConfig::new(selected, parsed.global.baud))
+                .sym_decrypt(&proof, key_id, algorithm, &nonce, &ciphertext)?;
+            Ok(CommandOutput::Bytes(plaintext))
+        }
         CommandSpec::GetAuditPage {
             start_sequence,
             max_events,
@@ -340,7 +391,7 @@ pub fn execute(parsed: ParsedArgs) -> Result<CommandOutput, CliError> {
             let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
             let metadata = SerialBackend::new(crate::client::ClientConfig::new(selected, parsed.global.baud))
                 .get_key_metadata(key_id, &proof)?;
-            Ok(lines_output(&[format_metadata_line(metadata)]))
+            Ok(lines_output(&[format_metadata_line(&metadata)]))
         }
         CommandSpec::RevokeKey { key_id, auth } => {
             let proof = load_proof(&auth)?;
@@ -521,17 +572,34 @@ fn format_key_line(record: &KeyListRecord) -> String {
     )
 }
 
-fn format_metadata_line(metadata: [u8; 10]) -> String {
-    let revision = u32::from_le_bytes([metadata[6], metadata[7], metadata[8], metadata[9]]);
+fn format_algorithm_profile(profile: &AlgorithmProfileRecord) -> String {
+    let algorithm = format!("algorithm={}", algorithm_name(profile.algorithm));
+    let operations = format!(
+        "operations={}",
+        algorithm_operation_names(profile.operation_mask)
+    );
     format!(
-        "key_id={}\talgorithm={}\torigin={}\tusage_mask=0x{:02x}\texport_policy={}\tlifecycle={}\trecord_revision={}",
-        metadata[0],
-        algorithm_name(metadata[1]),
-        origin_name(metadata[2]),
-        metadata[3],
-        export_policy_name(metadata[4]),
-        key_lifecycle_name(metadata[5]),
-        revision
+        "{algorithm:<32} {operations:<55} public_material_len={}",
+        profile.public_material_len
+    )
+}
+
+fn format_metadata_line(metadata: &KeyMetadataRecord) -> String {
+    let public_material = if metadata.public_material.is_empty() {
+        "none".to_string()
+    } else {
+        format_hex_bytes(&metadata.public_material)
+    };
+    format!(
+        "key_id={}\talgorithm={}\torigin={}\tusage_mask=0x{:02x}\texport_policy={}\tlifecycle={}\trecord_revision={}\tpublic_material={}",
+        metadata.key_id,
+        algorithm_name(metadata.algorithm),
+        origin_name(metadata.origin),
+        metadata.usage_mask,
+        export_policy_name(metadata.export_policy),
+        key_lifecycle_name(metadata.lifecycle_state),
+        metadata.record_revision,
+        public_material
     )
 }
 
@@ -729,9 +797,85 @@ fn algorithm_name(value: u8) -> &'static str {
     match value {
         0x01 => "ed25519",
         0x02 => "p256",
-        0x03 => "aes256",
+        0x03 => "chacha20poly1305",
+        0x04 => "aes256gcm",
         _ => "unknown",
     }
+}
+
+fn algorithm_operation_names(mask: u8) -> String {
+    let mut names = Vec::new();
+    if mask & 0x01 != 0 {
+        names.push("generate");
+    }
+    if mask & 0x02 != 0 {
+        names.push("sign");
+    }
+    if mask & 0x04 != 0 {
+        names.push("verify");
+    }
+    if mask & 0x08 != 0 {
+        names.push("encrypt");
+    }
+    if mask & 0x10 != 0 {
+        names.push("decrypt");
+    }
+    if mask & 0x20 != 0 {
+        names.push("wrapped-import");
+    }
+    if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(",")
+    }
+}
+
+fn parse_usage_mask(value: &str) -> Result<u8, CliError> {
+    let mut mask = 0u8;
+    for part in value.split(',') {
+        match part.trim() {
+            "sign" => mask |= 0x01,
+            "verify" => mask |= 0x02,
+            "encrypt" => mask |= 0x04,
+            "decrypt" => mask |= 0x08,
+            "wrapped-import" | "wrap-import" => mask |= 0x20,
+            "" => return Err(CliError::usage("usage entries must not be empty")),
+            _ => return Err(CliError::usage("invalid usage value")),
+        }
+    }
+    if mask == 0 {
+        return Err(CliError::usage("usage mask must not be empty"));
+    }
+    Ok(mask)
+}
+
+fn encode_symmetric_blob(nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CliError> {
+    let mut blob = Vec::with_capacity(1 + nonce.len() + ciphertext.len());
+    blob.push(u8::try_from(nonce.len()).map_err(|_| CliError::usage("nonce too large"))?);
+    blob.extend_from_slice(nonce);
+    blob.extend_from_slice(ciphertext);
+    Ok(blob)
+}
+
+fn decode_symmetric_blob(blob: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CliError> {
+    let Some(&nonce_len) = blob.first() else {
+        return Err(CliError::usage("ciphertext blob is truncated"));
+    };
+    let nonce_len = usize::from(nonce_len);
+    if blob.len() <= 1 + nonce_len {
+        return Err(CliError::usage("ciphertext blob is truncated"));
+    }
+    Ok((blob[1..=nonce_len].to_vec(), blob[1 + nonce_len..].to_vec()))
+}
+
+fn format_hex_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
 }
 
 fn origin_name(value: u8) -> &'static str {
@@ -763,9 +907,9 @@ fn key_lifecycle_name(value: u8) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{execute, format_status};
+    use super::{execute, format_algorithm_profile, format_status};
     use crate::cli::args::{AuthOptions, CommandSpec, GlobalOptions, ParsedArgs};
-    use crate::client::{Role, StatusReport};
+    use crate::client::{AlgorithmProfileRecord, Role, StatusReport};
 
     #[test]
     fn formats_status_report_with_capabilities() {
@@ -818,5 +962,18 @@ mod tests {
         })
         .expect_err("must fail");
         assert!(err.message.contains("environment variable"));
+    }
+
+    #[test]
+    fn formats_algorithm_profiles_in_aligned_columns() {
+        let line = format_algorithm_profile(&AlgorithmProfileRecord {
+            algorithm: 0x03,
+            operation_mask: 0x39,
+            public_material_len: 0,
+        });
+        assert_eq!(
+            line,
+            "algorithm=chacha20poly1305       operations=generate,encrypt,decrypt,wrapped-import      public_material_len=0"
+        );
     }
 }

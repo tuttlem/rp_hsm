@@ -52,10 +52,14 @@ mod crypto_fixtures;
 mod crypto_surface_validation;
 #[path = "protocol/managed_signing.rs"]
 mod managed_signing;
+#[path = "protocol/generated_signing_ops.rs"]
+mod generated_signing_ops;
 #[path = "protocol/public_verification.rs"]
 mod public_verification;
 #[path = "protocol/random_generation.rs"]
 mod random_generation;
+#[path = "protocol/generated_symmetric_ops.rs"]
+mod generated_symmetric_ops;
 #[path = "protocol/wrapped_import.rs"]
 mod wrapped_import;
 #[path = "protocol/high_risk_denials.rs"]

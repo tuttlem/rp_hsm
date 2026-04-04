@@ -1,33 +1,40 @@
+use aes_gcm::{
+    Aes256Gcm,
+    aead::{AeadInPlace as AesAeadInPlace, generic_array::GenericArray as AesGenericArray},
+};
 use heapless::Vec;
 use chacha20poly1305::{
     ChaCha20Poly1305, KeyInit,
-    aead::{AeadInPlace, generic_array::GenericArray},
+    aead::generic_array::GenericArray,
 };
 use ed25519_dalek::{Signer, Verifier};
-use p256::ecdsa::{Signature as P256Signature, VerifyingKey as P256VerifyingKey};
+use p256::ecdsa::{
+    Signature as P256Signature, SigningKey as P256SigningKey, VerifyingKey as P256VerifyingKey,
+};
 use sha2::{Digest, Sha256};
 
 use super::codec::{
     DecodeError, StatusCode, clear_bytes, decode_audit_page_request,
     decode_authentication_role, decode_authorized_payload,
     decode_begin_firmware_update_request, decode_complete_authentication_request,
-    decode_firmware_chunk_request, decode_frame, decode_import_wrapped_key_request,
-    decode_key_id_request, decode_key_marker_request, decode_put_persistent_key_request,
-    decode_random_request, decode_sign_request, decode_transition_request,
-    decode_verify_request, encode_audit_page_payload, encode_auth_challenge_payload,
-    encode_auth_session_payload, encode_crypto_capabilities_payload,
-    encode_developer_reset_payload, encode_device_status_payload,
+    decode_decrypt_request, decode_encrypt_request, decode_firmware_chunk_request, decode_frame,
+    decode_generate_key_request, decode_import_wrapped_key_request, decode_key_id_request,
+    decode_key_marker_request, decode_put_persistent_key_request, decode_random_request,
+    decode_sign_request, decode_transition_request, decode_verify_request,
+    encode_algorithm_profiles_payload, encode_audit_page_payload, encode_auth_challenge_payload,
+    encode_auth_session_payload, encode_crypto_capabilities_payload, encode_decrypt_response_payload,
+    encode_developer_reset_payload, encode_device_status_payload, encode_encrypt_response_payload,
     encode_firmware_abort_payload, encode_firmware_activation_payload,
     encode_firmware_chunk_progress_payload, encode_firmware_finalize_payload,
     encode_firmware_recovery_payload, encode_firmware_update_begin_payload,
-    encode_firmware_update_status_payload, encode_key_destroy_payload,
-    encode_key_list_payload, encode_key_metadata_payload, encode_key_record_result_payload,
-    encode_key_store_status_payload, encode_lifecycle_status_payload, encode_lock_result_payload,
-    encode_policy_denial_payload, encode_policy_profile_payload, encode_random_payload,
-    encode_recovery_result_payload, encode_session_status_payload, encode_signature_payload,
-    encode_state_revision_payload, encode_transition_result_payload, encode_verify_result_payload,
-    encode_zeroize_payload, encode_health_status_payload, policy_status_response,
-    protocol_version_response, status_response,
+    encode_firmware_update_status_payload, encode_health_status_payload,
+    encode_key_destroy_payload, encode_key_list_payload, encode_key_metadata_payload,
+    encode_key_record_result_payload, encode_key_store_status_payload,
+    encode_lifecycle_status_payload, encode_lock_result_payload, encode_policy_denial_payload,
+    encode_policy_profile_payload, encode_random_payload, encode_recovery_result_payload,
+    encode_session_status_payload, encode_signature_payload, encode_state_revision_payload,
+    encode_transition_result_payload, encode_verify_result_payload, encode_zeroize_payload,
+    policy_status_response, protocol_version_response, status_response,
 };
 use super::command::{CommandId, get_visible_catalog, lookup_command};
 use super::frame::{
@@ -37,14 +44,16 @@ use super::state::{
     ApprovalTargetBinding, ApprovalTicket, ApprovalTicketState, AuditEventClass, AuditEventCode,
     AuditJournal, AuditResultClass, AuditStoreSnapshot, AuthSnapshot, AuthenticationChallenge,
     AuthorityRole, BootSlotId, BootSlotMetadata, BootSlotState, CryptoPersistentState,
-    CryptoRuntimeState, DenialClass, DeviceState, FirmwareAbortResult, FirmwareActivationResult,
-    FirmwareChunkProgress, FirmwareFinalizeResult, FirmwarePackageManifest,
-    FirmwareRecoveryResult, FirmwareUpdateBeginResult, FirmwareVersion, KeyAlgorithm,
-    KeyLifecycleState, PersistentKeyStore, PolicyProfile, ProtectedActionClass,
-    ProvisioningRecord, ProvisioningSnapshot, RecoveryState, SessionLifecycleState, SessionRecord,
-    SessionState, SessionTracker, TrustedBootState, UPDATE_MANIFEST_VERSION,
+    CryptoRuntimeState, DecryptResponse, DenialClass, DeviceState, EncryptResponse,
+    FirmwareAbortResult, FirmwareActivationResult, FirmwareChunkProgress,
+    FirmwareFinalizeResult, FirmwarePackageManifest, FirmwareRecoveryResult,
+    FirmwareUpdateBeginResult, FirmwareVersion, KeyAlgorithm, KeyLifecycleState,
+    PersistentKeyStore, PolicyProfile, ProtectedActionClass, ProvisioningRecord,
+    ProvisioningSnapshot, RecoveryState, SessionLifecycleState, SessionRecord, SessionState,
+    SessionTracker, TrustedBootState, UPDATE_MANIFEST_VERSION,
     UPDATE_SIGNATURE_ALGORITHM_ED25519, UpdateRecoveryReason, UpdateResultClass,
-    UpdateTransferPhase, UpdateTransferState, USAGE_SIGN, USAGE_WRAP_IMPORT,
+    UpdateTransferPhase, UpdateTransferState, USAGE_DECRYPT, USAGE_ENCRYPT, USAGE_SIGN,
+    USAGE_WRAP_IMPORT,
     AcceptedFirmwareState, clear_active_session, default_boot_slots,
     clear_approval_tickets, clear_auth_failures, clear_challenge, clear_failure_counters,
     clear_secret_array, current_session_state, current_session_status, developer_mode_session,
@@ -772,6 +781,7 @@ impl ProtocolEngine {
             Some(CommandId::VerifyDetached) => Self::handle_verify_detached(frame),
             Some(CommandId::GetHealthStatus) => self.handle_get_health_status(),
             Some(CommandId::GetAuditPage) => self.handle_get_audit_page(frame),
+            Some(CommandId::ListAlgorithms) => self.handle_list_algorithms(frame),
             Some(CommandId::BeginProvisioning) => self.handle_begin_provisioning(frame),
             Some(CommandId::FinalizeProvisioning) => self.handle_finalize_provisioning(frame),
             Some(CommandId::LockDevice) => self.handle_lock_device(frame),
@@ -791,9 +801,12 @@ impl ProtocolEngine {
             Some(CommandId::DeveloperStoreFault) => self.handle_developer_store_fault(frame),
             Some(CommandId::DeveloperReboot) => self.handle_developer_reboot(frame),
             Some(CommandId::DeveloperSetPolicy) => self.handle_developer_set_policy(frame),
+            Some(CommandId::GenerateKey) => self.handle_generate_key(frame),
             Some(CommandId::SignDetached) => self.handle_sign_detached(frame),
             Some(CommandId::GenerateRandom) => self.handle_generate_random(frame),
             Some(CommandId::ImportWrappedKey) => self.handle_import_wrapped_key(frame),
+            Some(CommandId::Encrypt) => self.handle_encrypt(frame),
+            Some(CommandId::Decrypt) => self.handle_decrypt(frame),
             Some(CommandId::GetFirmwareUpdateStatus) => self.handle_get_firmware_update_status(frame),
             Some(CommandId::BeginFirmwareUpdate) => self.handle_begin_firmware_update(frame),
             Some(CommandId::TransferFirmwareChunk) => self.handle_transfer_firmware_chunk(frame),
@@ -802,12 +815,7 @@ impl ProtocolEngine {
             Some(CommandId::AbortFirmwareUpdate) => self.handle_abort_firmware_update(frame),
             Some(CommandId::RecoverTrustedFirmware) => self.handle_recover_trusted_firmware(frame),
             Some(CommandId::DeveloperUpdateFault) => self.handle_developer_update_fault(frame),
-            Some(
-                CommandId::ExportWrappedKey
-                | CommandId::Encrypt
-                | CommandId::Decrypt
-                | CommandId::DeriveSharedSecret,
-            ) => {
+            Some(CommandId::ExportWrappedKey | CommandId::DeriveSharedSecret) => {
                 status_response(StatusCode::CommandError, &[])
             }
             None => status_response(StatusCode::CommandError, &[]),
@@ -856,6 +864,16 @@ impl ProtocolEngine {
 
     fn handle_get_crypto_capabilities(&self) -> ProtocolFrame {
         let payload = encode_crypto_capabilities_payload(self.crypto_state.capabilities());
+        status_response(StatusCode::Success, &payload)
+    }
+
+    fn handle_list_algorithms(&self, frame: &ProtocolFrame) -> ProtocolFrame {
+        if !frame.payload.is_empty() {
+            return status_response(StatusCode::ValidationError, &[]);
+        }
+        let Some(payload) = encode_algorithm_profiles_payload(self.crypto_state.algorithm_profiles()) else {
+            return status_response(StatusCode::InternalError, &[]);
+        };
         status_response(StatusCode::Success, &payload)
     }
 
@@ -1858,10 +1876,10 @@ impl ProtocolEngine {
         };
 
         match self.key_store.get_key_metadata(key_id) {
-            Ok(view) => {
-                let payload = encode_key_metadata_payload(view);
-                status_response(StatusCode::Success, &payload)
-            }
+            Ok(view) => match encode_key_metadata_payload(&view) {
+                Some(payload) => status_response(StatusCode::Success, &payload),
+                None => status_response(StatusCode::InternalError, &[]),
+            },
             Err(status) => status_response(status, &[]),
         }
     }
@@ -1918,7 +1936,7 @@ impl ProtocolEngine {
             Err(status) => return status_response(status, &[]),
         };
         let key_policy = evaluate_key_policy(
-            metadata,
+            &metadata,
             None,
             0,
             false,
@@ -1962,6 +1980,103 @@ impl ProtocolEngine {
         }
     }
 
+    fn handle_generate_key(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        let (_, inner) = match self.authorize_privileged_owned::<2>(
+            AuthorityRole::KeyManager,
+            frame.payload.as_slice(),
+            2,
+            2,
+        ) {
+            Ok(values) => values,
+            Err(status) => return status_response(status, &[]),
+        };
+        let request = match decode_generate_key_request(inner.as_slice()) {
+            Ok(request) => request,
+            Err(status) => return status_response(status, &[]),
+        };
+
+        let (expected_usage_mask, material_bytes) = match request.algorithm {
+            KeyAlgorithm::Ed25519 => {
+                if request.usage_mask != USAGE_SIGN {
+                    return status_response(StatusCode::AuthorizationError, &[]);
+                }
+                let bytes = match self
+                    .crypto_state
+                    .generate_random_bytes(super::state::MAX_KEY_MATERIAL_LEN)
+                {
+                    Ok(bytes) => bytes,
+                    Err(StatusCode::StateError) => return status_response(StatusCode::InternalError, &[]),
+                    Err(status) => return status_response(status, &[]),
+                };
+                (USAGE_SIGN, bytes)
+            }
+            KeyAlgorithm::P256 => {
+                if request.usage_mask != USAGE_SIGN {
+                    return status_response(StatusCode::AuthorizationError, &[]);
+                }
+                let bytes = match self
+                    .crypto_state
+                    .generate_random_bytes(super::state::MAX_KEY_MATERIAL_LEN)
+                {
+                    Ok(bytes) => bytes,
+                    Err(StatusCode::StateError) => {
+                        return status_response(StatusCode::InternalError, &[]);
+                    }
+                    Err(status) => return status_response(status, &[]),
+                };
+                (USAGE_SIGN, bytes)
+            }
+            KeyAlgorithm::ChaCha20Poly1305 => {
+                if request.usage_mask != (USAGE_ENCRYPT | USAGE_DECRYPT) {
+                    return status_response(StatusCode::AuthorizationError, &[]);
+                }
+                let bytes = match self
+                    .crypto_state
+                    .generate_random_bytes(super::state::CHACHA20POLY1305_KEY_LEN)
+                {
+                    Ok(bytes) => bytes,
+                    Err(StatusCode::StateError) => return status_response(StatusCode::InternalError, &[]),
+                    Err(status) => return status_response(status, &[]),
+                };
+                (USAGE_ENCRYPT | USAGE_DECRYPT, bytes)
+            }
+            KeyAlgorithm::Aes256Gcm => {
+                if request.usage_mask != (USAGE_ENCRYPT | USAGE_DECRYPT) {
+                    return status_response(StatusCode::AuthorizationError, &[]);
+                }
+                let bytes = match self
+                    .crypto_state
+                    .generate_random_bytes(super::state::AES256GCM_KEY_LEN)
+                {
+                    Ok(bytes) => bytes,
+                    Err(StatusCode::StateError) => {
+                        return status_response(StatusCode::InternalError, &[]);
+                    }
+                    Err(status) => return status_response(status, &[]),
+                };
+                (USAGE_ENCRYPT | USAGE_DECRYPT, bytes)
+            }
+        };
+
+        match self.key_store.store_generated_key(
+            request.algorithm,
+            expected_usage_mask,
+            super::state::ExportPolicy::NonExportable,
+            material_bytes.as_slice(),
+        ) {
+            Ok(result) => {
+                self.record_audit_event(
+                    AuditEventClass::Administrative,
+                    AuditEventCode::CommandCompleted,
+                    AuditResultClass::Success,
+                    &[frame.code, result.key_id, request.algorithm as u8],
+                );
+                status_response(StatusCode::Success, &encode_key_record_result_payload(result))
+            }
+            Err(status) => status_response(status, &[]),
+        }
+    }
+
     fn handle_sign_detached(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
         let (_, mut inner) = match self.authorize_privileged_owned::<140>(
             AuthorityRole::KeyManager,
@@ -1979,11 +2094,6 @@ impl ProtocolEngine {
                 return status_response(status, &[]);
             }
         };
-        if request.algorithm != KeyAlgorithm::Ed25519 {
-            clear_bytes(inner.as_mut_slice());
-            return status_response(StatusCode::AuthorizationError, &[]);
-        }
-
         let metadata = match self.key_store.get_key_metadata(request.key_id) {
             Ok(view) => view,
             Err(status) => {
@@ -1992,8 +2102,8 @@ impl ProtocolEngine {
             }
         };
         let key_policy = evaluate_key_policy(
-            metadata,
-            Some(KeyAlgorithm::Ed25519),
+            &metadata,
+            Some(request.algorithm),
             USAGE_SIGN,
             false,
             &[KeyLifecycleState::Active],
@@ -2009,7 +2119,7 @@ impl ProtocolEngine {
 
         let mut key_bytes = match self
             .key_store
-            .export_key_material_for_operation(request.key_id, KeyAlgorithm::Ed25519, USAGE_SIGN, false)
+            .export_key_material_for_operation(request.key_id, request.algorithm, USAGE_SIGN, false)
         {
             Ok(material) => material,
             Err(status) => {
@@ -2017,11 +2127,30 @@ impl ProtocolEngine {
                 return status_response(status, &[]);
             }
         };
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
-        let signature = signing_key.sign(request.message.as_slice()).to_bytes();
-        let response = match encode_signature_payload(&signature) {
-            Some(payload) => status_response(StatusCode::Success, &payload),
-            None => status_response(StatusCode::InternalError, &[]),
+        let response = match request.algorithm {
+            KeyAlgorithm::Ed25519 => {
+                let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
+                let signature = signing_key.sign(request.message.as_slice()).to_bytes();
+                match encode_signature_payload(&signature) {
+                    Some(payload) => status_response(StatusCode::Success, &payload),
+                    None => status_response(StatusCode::InternalError, &[]),
+                }
+            }
+            KeyAlgorithm::P256 => {
+                let Ok(signing_key) = P256SigningKey::from_slice(&key_bytes) else {
+                    clear_secret_array(&mut key_bytes);
+                    clear_bytes(inner.as_mut_slice());
+                    return status_response(StatusCode::InternalError, &[]);
+                };
+                let signature: P256Signature = signing_key.sign(request.message.as_slice());
+                match encode_signature_payload(signature.to_bytes().as_slice()) {
+                    Some(payload) => status_response(StatusCode::Success, &payload),
+                    None => status_response(StatusCode::InternalError, &[]),
+                }
+            }
+            KeyAlgorithm::ChaCha20Poly1305 | KeyAlgorithm::Aes256Gcm => {
+                status_response(StatusCode::AuthorizationError, &[])
+            }
         };
         self.record_audit_event(
             AuditEventClass::Administrative,
@@ -2032,6 +2161,258 @@ impl ProtocolEngine {
         clear_secret_array(&mut key_bytes);
         clear_bytes(inner.as_mut_slice());
         response
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn handle_encrypt(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        let (_, mut inner) = match self.authorize_privileged_owned::<132>(
+            AuthorityRole::KeyManager,
+            frame.payload.as_slice(),
+            4,
+            132,
+        ) {
+            Ok(values) => values,
+            Err(status) => return status_response(status, &[]),
+        };
+        let request = match decode_encrypt_request(inner.as_slice()) {
+            Ok(request) => request,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let metadata = match self.key_store.get_key_metadata(request.key_id) {
+            Ok(view) => view,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let key_policy = evaluate_key_policy(
+            &metadata,
+            Some(request.algorithm),
+            USAGE_ENCRYPT,
+            false,
+            &[KeyLifecycleState::Active],
+        );
+        if !key_policy.decision {
+            clear_bytes(inner.as_mut_slice());
+            return policy_status_response(
+                status_for_denial_class(key_policy.denial_class),
+                key_policy.denial_class,
+                None,
+            );
+        }
+        let mut key_bytes = match self.key_store.export_key_material_for_operation(
+            request.key_id,
+            request.algorithm,
+            USAGE_ENCRYPT,
+            false,
+        ) {
+            Ok(material) => material,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let nonce_bytes = match self
+            .crypto_state
+            .generate_random_bytes(super::state::CHACHA20POLY1305_NONCE_LEN)
+        {
+            Ok(bytes) => bytes,
+            Err(StatusCode::StateError) => {
+                clear_secret_array(&mut key_bytes);
+                clear_bytes(inner.as_mut_slice());
+                return status_response(StatusCode::InternalError, &[]);
+            }
+            Err(status) => {
+                clear_secret_array(&mut key_bytes);
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let mut ciphertext = request.plaintext.clone();
+        let mut tag_bytes = Vec::<u8, { super::state::AES256GCM_TAG_LEN }>::new();
+        match request.algorithm {
+            KeyAlgorithm::ChaCha20Poly1305 => {
+                let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&key_bytes));
+                let nonce = GenericArray::from_slice(nonce_bytes.as_slice());
+                let Ok(tag) = cipher.encrypt_in_place_detached(nonce, b"", ciphertext.as_mut_slice()) else {
+                    clear_secret_array(&mut key_bytes);
+                    clear_bytes(inner.as_mut_slice());
+                    return status_response(StatusCode::InternalError, &[]);
+                };
+                if tag_bytes.extend_from_slice(tag.as_slice()).is_err() {
+                    clear_secret_array(&mut key_bytes);
+                    clear_bytes(inner.as_mut_slice());
+                    return status_response(StatusCode::InternalError, &[]);
+                }
+            }
+            KeyAlgorithm::Aes256Gcm => {
+                let cipher = Aes256Gcm::new(AesGenericArray::from_slice(&key_bytes));
+                let nonce = AesGenericArray::from_slice(nonce_bytes.as_slice());
+                let Ok(tag) = cipher.encrypt_in_place_detached(nonce, b"", ciphertext.as_mut_slice()) else {
+                    clear_secret_array(&mut key_bytes);
+                    clear_bytes(inner.as_mut_slice());
+                    return status_response(StatusCode::InternalError, &[]);
+                };
+                if tag_bytes.extend_from_slice(tag.as_slice()).is_err() {
+                    clear_secret_array(&mut key_bytes);
+                    clear_bytes(inner.as_mut_slice());
+                    return status_response(StatusCode::InternalError, &[]);
+                }
+            }
+            KeyAlgorithm::Ed25519 | KeyAlgorithm::P256 => {
+                clear_secret_array(&mut key_bytes);
+                clear_bytes(inner.as_mut_slice());
+                return status_response(StatusCode::AuthorizationError, &[]);
+            }
+        }
+        if ciphertext.extend_from_slice(tag_bytes.as_slice()).is_err() {
+            clear_secret_array(&mut key_bytes);
+            clear_bytes(inner.as_mut_slice());
+            return status_response(StatusCode::InternalError, &[]);
+        }
+        let mut nonce = Vec::<u8, { super::state::CHACHA20POLY1305_NONCE_LEN }>::new();
+        if nonce.extend_from_slice(nonce_bytes.as_slice()).is_err() {
+            clear_secret_array(&mut key_bytes);
+            clear_bytes(inner.as_mut_slice());
+            return status_response(StatusCode::InternalError, &[]);
+        }
+        let mut encoded_ciphertext = Vec::<u8, { super::state::MAX_CIPHERTEXT_LEN }>::new();
+        if encoded_ciphertext
+            .extend_from_slice(ciphertext.as_slice())
+            .is_err()
+        {
+            clear_secret_array(&mut key_bytes);
+            clear_bytes(inner.as_mut_slice());
+            return status_response(StatusCode::InternalError, &[]);
+        }
+        let response_payload = encode_encrypt_response_payload(&EncryptResponse {
+            nonce,
+            ciphertext: encoded_ciphertext,
+        });
+        self.record_audit_event(
+            AuditEventClass::Administrative,
+            AuditEventCode::CommandCompleted,
+            AuditResultClass::Success,
+            &[frame.code, request.key_id],
+        );
+        clear_secret_array(&mut key_bytes);
+        clear_bytes(inner.as_mut_slice());
+        match response_payload {
+            Some(payload) => status_response(StatusCode::Success, &payload),
+            None => status_response(StatusCode::InternalError, &[]),
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn handle_decrypt(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        let (_, mut inner) = match self.authorize_privileged_owned::<167>(
+            AuthorityRole::KeyManager,
+            frame.payload.as_slice(),
+            18,
+            167,
+        ) {
+            Ok(values) => values,
+            Err(status) => return status_response(status, &[]),
+        };
+        let request = match decode_decrypt_request(inner.as_slice()) {
+            Ok(request) => request,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let metadata = match self.key_store.get_key_metadata(request.key_id) {
+            Ok(view) => view,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let key_policy = evaluate_key_policy(
+            &metadata,
+            Some(request.algorithm),
+            USAGE_DECRYPT,
+            false,
+            &[KeyLifecycleState::Active],
+        );
+        if !key_policy.decision {
+            clear_bytes(inner.as_mut_slice());
+            return policy_status_response(
+                status_for_denial_class(key_policy.denial_class),
+                key_policy.denial_class,
+                None,
+            );
+        }
+        let mut key_bytes = match self.key_store.export_key_material_for_operation(
+            request.key_id,
+            request.algorithm,
+            USAGE_DECRYPT,
+            false,
+        ) {
+            Ok(material) => material,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        if request.ciphertext.len() < super::state::CHACHA20POLY1305_TAG_LEN {
+            clear_secret_array(&mut key_bytes);
+            clear_bytes(inner.as_mut_slice());
+            return status_response(StatusCode::ValidationError, &[]);
+        }
+        let split_at = request
+            .ciphertext
+            .len()
+            .saturating_sub(super::state::CHACHA20POLY1305_TAG_LEN);
+        let mut plaintext = Vec::<u8, { super::state::MAX_CRYPTO_MESSAGE_LEN }>::new();
+        if plaintext
+            .extend_from_slice(&request.ciphertext.as_slice()[..split_at])
+            .is_err()
+        {
+            clear_secret_array(&mut key_bytes);
+            clear_bytes(inner.as_mut_slice());
+            return status_response(StatusCode::InternalError, &[]);
+        }
+        let decrypt_result = match request.algorithm {
+            KeyAlgorithm::ChaCha20Poly1305 => {
+                let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&key_bytes));
+                let nonce = GenericArray::from_slice(request.nonce.as_slice());
+                let tag =
+                    chacha20poly1305::Tag::from_slice(&request.ciphertext.as_slice()[split_at..]);
+                cipher.decrypt_in_place_detached(nonce, b"", plaintext.as_mut_slice(), tag)
+            }
+            KeyAlgorithm::Aes256Gcm => {
+                let cipher = Aes256Gcm::new(AesGenericArray::from_slice(&key_bytes));
+                let nonce = AesGenericArray::from_slice(request.nonce.as_slice());
+                let tag = aes_gcm::Tag::from_slice(&request.ciphertext.as_slice()[split_at..]);
+                cipher.decrypt_in_place_detached(nonce, b"", plaintext.as_mut_slice(), tag)
+            }
+            KeyAlgorithm::Ed25519 | KeyAlgorithm::P256 => {
+                clear_secret_array(&mut key_bytes);
+                clear_bytes(inner.as_mut_slice());
+                return status_response(StatusCode::AuthorizationError, &[]);
+            }
+        };
+        clear_secret_array(&mut key_bytes);
+        clear_bytes(inner.as_mut_slice());
+        match decrypt_result {
+            Ok(()) => {
+                self.record_audit_event(
+                    AuditEventClass::Administrative,
+                    AuditEventCode::CommandCompleted,
+                    AuditResultClass::Success,
+                    &[frame.code, request.key_id],
+                );
+                match encode_decrypt_response_payload(&DecryptResponse { plaintext }) {
+                    Some(payload) => status_response(StatusCode::Success, &payload),
+                    None => status_response(StatusCode::InternalError, &[]),
+                }
+            }
+            Err(_) => status_response(StatusCode::ValidationError, &[]),
+        }
     }
 
     fn handle_verify_detached(frame: &ProtocolFrame) -> ProtocolFrame {
@@ -2068,7 +2449,9 @@ impl ProtocolEngine {
                 };
                 verifying_key.verify(request.message.as_slice(), &signature).is_ok()
             }
-            KeyAlgorithm::Aes256 => return status_response(StatusCode::AuthorizationError, &[]),
+            KeyAlgorithm::ChaCha20Poly1305 | KeyAlgorithm::Aes256Gcm => {
+                return status_response(StatusCode::AuthorizationError, &[])
+            }
         };
         let payload = encode_verify_result_payload(verified);
         status_response(StatusCode::Success, &payload)
@@ -2143,8 +2526,8 @@ impl ProtocolEngine {
             }
         };
         let key_policy = evaluate_key_policy(
-            metadata,
-            Some(KeyAlgorithm::Aes256),
+            &metadata,
+            Some(KeyAlgorithm::ChaCha20Poly1305),
             USAGE_WRAP_IMPORT,
             false,
             &[KeyLifecycleState::Active],
@@ -2159,7 +2542,7 @@ impl ProtocolEngine {
         }
         let mut wrapping_key = match self.key_store.export_key_material_for_operation(
             request.wrapping_key_id,
-            KeyAlgorithm::Aes256,
+            KeyAlgorithm::ChaCha20Poly1305,
             USAGE_WRAP_IMPORT,
             false,
         ) {

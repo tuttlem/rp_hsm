@@ -39,7 +39,10 @@ fn put_and_metadata_vectors_return_non_secret_fields() {
     assert!(decoded.is_ok());
     let decoded = decoded.unwrap_or_default();
     assert_eq!(decoded.code, StatusCode::Success.as_u8());
-    assert_eq!(decoded.payload.as_slice(), &[0x01, 0x01, 0x01, USAGE_SIGN, 0x01, 0x02, 0x01, 0x00, 0x00, 0x00]);
+    assert_eq!(
+        decoded.payload.as_slice(),
+        &[0x01, 0x01, 0x01, USAGE_SIGN, 0x01, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00]
+    );
 }
 
 #[test]

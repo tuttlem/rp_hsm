@@ -7,10 +7,21 @@ fn parse(parts: &[&str]) -> CommandSpec {
 }
 
 #[test]
-fn reserved_future_verbs_remain_explicitly_unavailable() {
+fn implemented_crypto_verbs_are_part_of_the_supported_surface() {
     assert!(matches!(
-        parse(&["rphsmtool", "sym-encrypt"]),
-        CommandSpec::Unsupported { .. }
+        parse(&[
+            "rphsmtool",
+            "sym-encrypt",
+            "--key-id",
+            "1",
+            "--algorithm",
+            "aes256gcm",
+            "--role",
+            "key-manager",
+            "--proof-env",
+            "RPHSM_KEYMG",
+        ]),
+        CommandSpec::SymEncrypt { .. }
     ));
 }
 

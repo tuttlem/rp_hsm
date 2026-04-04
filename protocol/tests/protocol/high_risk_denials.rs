@@ -9,7 +9,7 @@ fn excluded_high_risk_commands_fail_closed() {
     let session = complete_auth(&mut engine, challenge, 1, b"KEYMG");
     let payload = super::crypto_fixtures::authorized(session, 2, &[]);
 
-    for code in [0x93, 0x94, 0x95, 0x96] {
+    for code in [0x93, 0x96] {
         let response = engine.handle_bytes(&request(code, 0x02, &payload));
         assert!(matches!(
             response.code,

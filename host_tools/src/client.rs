@@ -11,9 +11,9 @@ use sha2::{Digest, Sha256};
 
 use crate::cli::output::{CliError, TransportCondition};
 
-const DEFAULT_TIMEOUT_MS: u64 = 1_000;
+const DEFAULT_TIMEOUT_MS: u64 = 2_000;
 const FLASH_SETTLE_MS: u64 = 200;
-const READ_RETRY_ATTEMPTS: usize = 20;
+const READ_RETRY_ATTEMPTS: usize = 60;
 const READ_RETRY_DELAY_MS: u64 = 150;
 const UPDATE_TRUST_ANCHOR_SEED: [u8; 32] = *b"rp_hsm_update_anchor_seed_v1____";
 
@@ -235,6 +235,62 @@ impl VerifyAlgorithm {
             _ => Err(CliError::usage("invalid verify algorithm")),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManagedAlgorithm {
+    Ed25519 = 0x01,
+    P256 = 0x02,
+    ChaCha20Poly1305 = 0x03,
+    Aes256Gcm = 0x04,
+}
+
+impl ManagedAlgorithm {
+    /// # Errors
+    ///
+    /// Returns `CliError` when the provided algorithm name is unsupported.
+    pub fn parse(value: &str) -> Result<Self, CliError> {
+        match value {
+            "ed25519" => Ok(Self::Ed25519),
+            "p256" => Ok(Self::P256),
+            "chacha20poly1305" | "chacha20-poly1305" => Ok(Self::ChaCha20Poly1305),
+            "aes256gcm" | "aes-256-gcm" => Ok(Self::Aes256Gcm),
+            _ => Err(CliError::usage("invalid algorithm value")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlgorithmProfileRecord {
+    pub algorithm: u8,
+    pub operation_mask: u8,
+    pub public_material_len: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GenerateKeyResult {
+    pub key_id: u8,
+    pub lifecycle_state: u8,
+    pub record_revision: u32,
+    pub store_revision: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyMetadataRecord {
+    pub key_id: u8,
+    pub algorithm: u8,
+    pub origin: u8,
+    pub usage_mask: u8,
+    pub export_policy: u8,
+    pub lifecycle_state: u8,
+    pub record_revision: u32,
+    pub public_material: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EncryptResult {
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
 }
 
 fn build_authorized_request(
@@ -630,6 +686,109 @@ impl SerialBackend {
 
     /// # Errors
     ///
+    /// Returns `CliError` when algorithm discovery fails.
+    pub fn list_algorithms(&self) -> Result<Vec<AlgorithmProfileRecord>, CliError> {
+        let mut port = open_port(&self.config)?;
+        let request = ProtocolFrame::new(MessageKind::Request, 0x0e, 0x00, &[]).unwrap_or_default();
+        let response = exchange_frame(&mut *port, &request)?;
+        ensure_status(&response, StatusCode::Success)?;
+        decode_algorithm_profiles(response.payload.as_slice())
+    }
+
+    /// # Errors
+    ///
+    /// Returns `CliError` when key generation fails.
+    pub fn generate_key(
+        &self,
+        proof: &[u8],
+        algorithm: ManagedAlgorithm,
+        usage_mask: u8,
+    ) -> Result<GenerateKeyResult, CliError> {
+        let mut port = open_port(&self.config)?;
+        let mut session = authenticate_on_port(&mut *port, Role::KeyManager, proof)?;
+        let response = exchange_authorized(
+            &mut *port,
+            &mut session,
+            0xa0,
+            0x02,
+            &[algorithm as u8, usage_mask],
+        )?;
+        ensure_status(&response, StatusCode::Success)?;
+        let payload = copy_array::<10>(response.payload.as_slice())?;
+        Ok(GenerateKeyResult {
+            key_id: payload[0],
+            lifecycle_state: payload[1],
+            record_revision: u32::from_le_bytes([payload[2], payload[3], payload[4], payload[5]]),
+            store_revision: u32::from_le_bytes([payload[6], payload[7], payload[8], payload[9]]),
+        })
+    }
+
+    /// # Errors
+    ///
+    /// Returns `CliError` when encryption fails.
+    pub fn sym_encrypt(
+        &self,
+        proof: &[u8],
+        key_id: u8,
+        algorithm: ManagedAlgorithm,
+        plaintext: &[u8],
+    ) -> Result<EncryptResult, CliError> {
+        if plaintext.is_empty() || plaintext.len() > 128 {
+            return Err(CliError::usage("plaintext must be between 1 and 128 bytes"));
+        }
+        let mut port = open_port(&self.config)?;
+        let mut session = authenticate_on_port(&mut *port, Role::KeyManager, proof)?;
+        let mut inner = Vec::new();
+        inner.push(key_id);
+        inner.push(algorithm as u8);
+        inner.extend_from_slice(
+            &u16::try_from(plaintext.len())
+                .map_err(|_| CliError::usage("plaintext is too large"))?
+                .to_le_bytes(),
+        );
+        inner.extend_from_slice(plaintext);
+        let response = exchange_authorized(&mut *port, &mut session, 0x94, 0x02, &inner)?;
+        ensure_status(&response, StatusCode::Success)?;
+        decode_encrypt_response(response.payload.as_slice())
+    }
+
+    /// # Errors
+    ///
+    /// Returns `CliError` when decryption fails.
+    pub fn sym_decrypt(
+        &self,
+        proof: &[u8],
+        key_id: u8,
+        algorithm: ManagedAlgorithm,
+        nonce: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, CliError> {
+        if nonce.len() != 12 {
+            return Err(CliError::usage("nonce must be exactly 12 bytes"));
+        }
+        if ciphertext.len() < 16 || ciphertext.len() > 144 {
+            return Err(CliError::usage("ciphertext must be between 16 and 144 bytes"));
+        }
+        let mut port = open_port(&self.config)?;
+        let mut session = authenticate_on_port(&mut *port, Role::KeyManager, proof)?;
+        let mut inner = Vec::new();
+        inner.push(key_id);
+        inner.push(algorithm as u8);
+        inner.push(u8::try_from(nonce.len()).map_err(|_| CliError::usage("nonce too large"))?);
+        inner.extend_from_slice(nonce);
+        inner.extend_from_slice(
+            &u16::try_from(ciphertext.len())
+                .map_err(|_| CliError::usage("ciphertext is too large"))?
+                .to_le_bytes(),
+        );
+        inner.extend_from_slice(ciphertext);
+        let response = exchange_authorized(&mut *port, &mut session, 0x95, 0x02, &inner)?;
+        ensure_status(&response, StatusCode::Success)?;
+        decode_decrypt_response(response.payload.as_slice())
+    }
+
+    /// # Errors
+    ///
     /// Returns `CliError` when authorization or update status retrieval fails.
     pub fn get_firmware_update_status(
         &self,
@@ -816,11 +975,16 @@ impl SerialBackend {
         if message.is_empty() || message.len() > 128 {
             return Err(CliError::usage("message must be between 1 and 128 bytes"));
         }
+        let algorithm = match self.get_key_metadata(key_id, proof)?.algorithm {
+            0x01 => 0x01,
+            0x02 => 0x02,
+            _ => return Err(CliError::usage("key is not a supported signing key")),
+        };
         let mut port = open_port(&self.config)?;
         let mut session = authenticate_on_port(&mut *port, Role::KeyManager, proof)?;
         let mut inner = Vec::with_capacity(4 + message.len());
         inner.push(key_id);
-        inner.push(0x01);
+        inner.push(algorithm);
         inner.extend_from_slice(
             &u16::try_from(message.len())
                 .map_err(|_| CliError::usage("message is too large"))?
@@ -912,12 +1076,12 @@ impl SerialBackend {
     /// # Errors
     ///
     /// Returns `CliError` when authentication or metadata retrieval fails.
-    pub fn get_key_metadata(&self, key_id: u8, proof: &[u8]) -> Result<[u8; 10], CliError> {
+    pub fn get_key_metadata(&self, key_id: u8, proof: &[u8]) -> Result<KeyMetadataRecord, CliError> {
         let mut port = open_port(&self.config)?;
         let mut session = authenticate_on_port(&mut *port, Role::KeyManager, proof)?;
         let response = exchange_authorized(&mut *port, &mut session, 0x8b, 0x00, &[key_id])?;
         ensure_status(&response, StatusCode::Success)?;
-        copy_array::<10>(response.payload.as_slice())
+        decode_key_metadata(response.payload.as_slice())
     }
 
     /// # Errors
@@ -1248,6 +1412,79 @@ fn decode_key_list(payload: &[u8]) -> Result<Vec<KeyListRecord>, CliError> {
         });
     }
     Ok(keys)
+}
+
+fn decode_algorithm_profiles(payload: &[u8]) -> Result<Vec<AlgorithmProfileRecord>, CliError> {
+    let Some(&count) = payload.first() else {
+        return Err(CliError::invalid_response("missing algorithm count"));
+    };
+    let expected_len = 1 + usize::from(count) * 3;
+    if payload.len() != expected_len {
+        return Err(CliError::invalid_response("unexpected algorithm profile length"));
+    }
+    let mut profiles = Vec::new();
+    for idx in 0..usize::from(count) {
+        let start = 1 + idx * 3;
+        profiles.push(AlgorithmProfileRecord {
+            algorithm: payload[start],
+            operation_mask: payload[start + 1],
+            public_material_len: payload[start + 2],
+        });
+    }
+    Ok(profiles)
+}
+
+fn decode_key_metadata(payload: &[u8]) -> Result<KeyMetadataRecord, CliError> {
+    if payload.len() < 11 {
+        return Err(CliError::invalid_response("key metadata is truncated"));
+    }
+    let public_material_len = usize::from(payload[10]);
+    if payload.len() != 11 + public_material_len {
+        return Err(CliError::invalid_response("unexpected key metadata length"));
+    }
+    Ok(KeyMetadataRecord {
+        key_id: payload[0],
+        algorithm: payload[1],
+        origin: payload[2],
+        usage_mask: payload[3],
+        export_policy: payload[4],
+        lifecycle_state: payload[5],
+        record_revision: u32::from_le_bytes([payload[6], payload[7], payload[8], payload[9]]),
+        public_material: payload[11..].to_vec(),
+    })
+}
+
+fn decode_encrypt_response(payload: &[u8]) -> Result<EncryptResult, CliError> {
+    if payload.len() < 4 {
+        return Err(CliError::invalid_response("encrypt response is truncated"));
+    }
+    let nonce_len = usize::from(payload[0]);
+    if payload.len() < 1 + nonce_len + 2 {
+        return Err(CliError::invalid_response("encrypt nonce is truncated"));
+    }
+    let ciphertext_len_index = 1 + nonce_len;
+    let ciphertext_len = usize::from(u16::from_le_bytes([
+        payload[ciphertext_len_index],
+        payload[ciphertext_len_index + 1],
+    ]));
+    if payload.len() != ciphertext_len_index + 2 + ciphertext_len {
+        return Err(CliError::invalid_response("encrypt ciphertext length is invalid"));
+    }
+    Ok(EncryptResult {
+        nonce: payload[1..=nonce_len].to_vec(),
+        ciphertext: payload[ciphertext_len_index + 2..].to_vec(),
+    })
+}
+
+fn decode_decrypt_response(payload: &[u8]) -> Result<Vec<u8>, CliError> {
+    if payload.len() < 2 {
+        return Err(CliError::invalid_response("decrypt response is truncated"));
+    }
+    let plaintext_len = usize::from(u16::from_le_bytes([payload[0], payload[1]]));
+    if payload.len() != 2 + plaintext_len {
+        return Err(CliError::invalid_response("decrypt plaintext length is invalid"));
+    }
+    Ok(payload[2..].to_vec())
 }
 
 fn decode_audit_page(payload: &[u8]) -> Result<AuditPage, CliError> {

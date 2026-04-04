@@ -1,5 +1,5 @@
 use super::output::CliError;
-use crate::client::{DeveloperFaultAction, PolicyProfileUpdate, Role, VerifyAlgorithm};
+use crate::client::{DeveloperFaultAction, ManagedAlgorithm, PolicyProfileUpdate, Role, VerifyAlgorithm};
 
 pub const DEFAULT_BAUD: u32 = 115_200;
 
@@ -19,6 +19,7 @@ pub struct AuthOptions {
 pub enum CommandSpec {
     Find,
     Status,
+    ListAlgorithms,
     UpdateStatus { auth: AuthOptions },
     ApplyUpdate { image_path: String, version: String, auth: AuthOptions },
     AbortUpdate { session_id: u32, auth: AuthOptions },
@@ -39,6 +40,9 @@ pub enum CommandSpec {
     RecoverToProvisioned { auth: AuthOptions },
     ReactivateRecovered { transition_id: u32, auth: AuthOptions },
     GetRandom { bytes: u8, auth: AuthOptions },
+    GenerateKey { algorithm: ManagedAlgorithm, usage: String, auth: AuthOptions },
+    SymEncrypt { key_id: u8, algorithm: ManagedAlgorithm, auth: AuthOptions },
+    SymDecrypt { key_id: u8, algorithm: ManagedAlgorithm, auth: AuthOptions },
     GetAuditPage {
         start_sequence: u32,
         max_events: u8,
@@ -94,6 +98,8 @@ where
     let mut key_id = None;
     let mut label = None;
     let mut algorithm = None;
+    let mut managed_algorithm = None;
+    let mut usage = None;
     let mut image = None;
     let mut version = None;
     let mut public_key_hex = None;
@@ -169,7 +175,18 @@ where
                 let Some(value) = rest.get(idx) else {
                     return Err(CliError::usage("missing value for --algorithm"));
                 };
-                algorithm = Some(VerifyAlgorithm::parse(value)?);
+                algorithm = VerifyAlgorithm::parse(value).ok();
+                managed_algorithm = ManagedAlgorithm::parse(value).ok();
+                if algorithm.is_none() && managed_algorithm.is_none() {
+                    return Err(CliError::usage("invalid value for --algorithm"));
+                }
+            }
+            "--usage" => {
+                idx += 1;
+                let Some(value) = rest.get(idx) else {
+                    return Err(CliError::usage("missing value for --usage"));
+                };
+                usage = Some(value.clone());
             }
             "--image" => {
                 idx += 1;
@@ -254,13 +271,15 @@ where
 
     let global = GlobalOptions { device, baud };
     let command = build_command(
-        command_name,
+        &command_name,
         role,
         proof_env,
         bytes,
         key_id,
         label,
         algorithm,
+        managed_algorithm,
+        usage,
         image,
         version,
         public_key_hex,
@@ -324,13 +343,15 @@ fn qualify_subcommand(prefix: &str, rest: &mut Vec<String>) -> Result<String, Cl
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn build_command(
-    command_name: String,
+    command_name: &str,
     role: Option<Role>,
     proof_env: Option<String>,
     bytes: Option<u8>,
     key_id: Option<u8>,
     label: Option<String>,
     algorithm: Option<VerifyAlgorithm>,
+    managed_algorithm: Option<ManagedAlgorithm>,
+    usage: Option<String>,
     image: Option<String>,
     version: Option<String>,
     public_key_hex: Option<String>,
@@ -343,9 +364,10 @@ fn build_command(
     max_events: Option<u8>,
     one_line: bool,
 ) -> Result<CommandSpec, CliError> {
-    match command_name.as_str() {
+    match command_name {
         "find" => Ok(CommandSpec::Find),
         "status" => Ok(CommandSpec::Status),
+        "list-algorithms" => Ok(CommandSpec::ListAlgorithms),
         "update-status" => Ok(CommandSpec::UpdateStatus {
             auth: parse_auth(role, proof_env, &[Role::Administrator, Role::Recovery])?,
         }),
@@ -429,6 +451,24 @@ fn build_command(
             bytes: bytes.ok_or_else(|| CliError::usage("missing --bytes for get-random"))?,
             auth: parse_auth(role, proof_env, &[Role::Administrator, Role::KeyManager])?,
         }),
+        "generate-key" => Ok(CommandSpec::GenerateKey {
+            algorithm: managed_algorithm
+                .ok_or_else(|| CliError::usage("missing --algorithm for generate-key"))?,
+            usage: usage.ok_or_else(|| CliError::usage("missing --usage for generate-key"))?,
+            auth: parse_auth(role, proof_env, &[Role::KeyManager])?,
+        }),
+        "sym-encrypt" => Ok(CommandSpec::SymEncrypt {
+            key_id: key_id.ok_or_else(|| CliError::usage("missing --key-id for sym-encrypt"))?,
+            algorithm: managed_algorithm
+                .ok_or_else(|| CliError::usage("missing --algorithm for sym-encrypt"))?,
+            auth: parse_auth(role, proof_env, &[Role::KeyManager])?,
+        }),
+        "sym-decrypt" => Ok(CommandSpec::SymDecrypt {
+            key_id: key_id.ok_or_else(|| CliError::usage("missing --key-id for sym-decrypt"))?,
+            algorithm: managed_algorithm
+                .ok_or_else(|| CliError::usage("missing --algorithm for sym-decrypt"))?,
+            auth: parse_auth(role, proof_env, &[Role::KeyManager])?,
+        }),
         "get-audit-page" | "audit-page" => Ok(CommandSpec::GetAuditPage {
             start_sequence: start_sequence.unwrap_or(0),
             max_events: max_events.ok_or_else(|| CliError::usage("missing --max-events for get-audit-page"))?,
@@ -464,9 +504,6 @@ fn build_command(
             key_id: key_id.ok_or_else(|| CliError::usage("missing --key-id for destroy-key"))?,
             auth: parse_auth(role, proof_env, &[Role::KeyManager])?,
         }),
-        "sym-encrypt" | "sym-decrypt" => {
-            Ok(CommandSpec::Unsupported { verb: command_name })
-        }
         other => Err(CliError::usage(format!("unknown command: {other}"))),
     }
 }
@@ -516,6 +553,7 @@ fn command_usage(command: &str, show_all_help: bool) -> String {
     match command {
         "find" => "Usage: rphsmtool find [--baud 115200]".into(),
         "status" => "Usage: rphsmtool status [--device PATH] [--baud 115200]".into(),
+        "list-algorithms" => "Usage: rphsmtool list-algorithms [--device PATH] [--baud 115200]".into(),
         "update-status" => "Usage: rphsmtool update-status [--device PATH] --role administrator|recovery --proof-env VAR [--baud 115200]".into(),
         "apply-update" => "Usage: rphsmtool apply-update [--device PATH] --image FILE --version EPOCH.MAJOR.MINOR.PATCH --role administrator --proof-env VAR [--baud 115200]".into(),
         "abort-update" => "Usage: rphsmtool abort-update [--device PATH] --session-id ID --role administrator --proof-env VAR [--baud 115200]".into(),
@@ -542,6 +580,7 @@ fn command_usage(command: &str, show_all_help: bool) -> String {
         "recover-to-provisioned" => "Usage: rphsmtool recover-to-provisioned [--device PATH] --role recovery --proof-env VAR [--baud 115200]".into(),
         "reactivate-recovered" => "Usage: rphsmtool reactivate-recovered [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]".into(),
         "get-random" => "Usage: rphsmtool get-random [--device PATH] --bytes N --role administrator|key-manager --proof-env VAR [--baud 115200]".into(),
+        "generate-key" => "Usage: rphsmtool generate-key [--device PATH] --algorithm ed25519|chacha20poly1305 --usage sign|encrypt,decrypt --role key-manager --proof-env VAR [--baud 115200]".into(),
         "get-audit-page" => "Usage: rphsmtool get-audit-page [--device PATH] [--start-sequence N] --max-events N [--one-line] --role administrator|recovery --proof-env VAR [--baud 115200]".into(),
         "sign" => "Usage: rphsmtool sign [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin".into(),
         "verify" => "Usage: rphsmtool verify [--device PATH] --algorithm ed25519|p256 --public-key-hex HEX --signature-hex HEX [--baud 115200] < message.bin".into(),
@@ -550,8 +589,8 @@ fn command_usage(command: &str, show_all_help: bool) -> String {
         "get-key-metadata" => "Usage: rphsmtool get-key-metadata [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200]".into(),
         "revoke-key" => "Usage: rphsmtool revoke-key [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200]".into(),
         "destroy-key" => "Usage: rphsmtool destroy-key [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200]".into(),
-        "sym-encrypt" => "Usage: rphsmtool sym-encrypt [reserved for a later firmware feature]".into(),
-        "sym-decrypt" => "Usage: rphsmtool sym-decrypt [reserved for a later firmware feature]".into(),
+        "sym-encrypt" => "Usage: rphsmtool sym-encrypt [--device PATH] --key-id ID --algorithm chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < plaintext.bin".into(),
+        "sym-decrypt" => "Usage: rphsmtool sym-decrypt [--device PATH] --key-id ID --algorithm chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < ciphertext.bin".into(),
         _ => {
             if show_all_help {
                 all_usage_text()
@@ -570,7 +609,11 @@ pub fn usage_text() -> String {
         "  rphsmtool status [--device PATH] [--baud 115200]",
         "",
         "User Commands:",
+        "  rphsmtool list-algorithms [--device PATH] [--baud 115200]",
         "  rphsmtool get-random [--device PATH] --bytes N --role administrator|key-manager --proof-env VAR [--baud 115200]",
+        "  rphsmtool generate-key [--device PATH] --algorithm ed25519|chacha20poly1305 --usage sign|encrypt,decrypt --role key-manager --proof-env VAR [--baud 115200]",
+        "  rphsmtool sym-encrypt [--device PATH] --key-id ID --algorithm chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < plaintext.bin",
+        "  rphsmtool sym-decrypt [--device PATH] --key-id ID --algorithm chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < ciphertext.bin",
         "  rphsmtool sign [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin",
         "  rphsmtool verify [--device PATH] --algorithm ed25519|p256 --public-key-hex HEX --signature-hex HEX [--baud 115200] < message.bin",
         "  rphsmtool list-keys [--device PATH] --role key-manager --proof-env VAR [--baud 115200]",
@@ -625,6 +668,7 @@ pub fn all_usage_text() -> String {
         "Usage:",
         "  rphsmtool find [--baud 115200]",
         "  rphsmtool status [--device PATH] [--baud 115200]",
+        "  rphsmtool list-algorithms [--device PATH] [--baud 115200]",
         "  rphsmtool update-status [--device PATH] --role administrator|recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool apply-update [--device PATH] --image FILE --version EPOCH.MAJOR.MINOR.PATCH --role administrator --proof-env VAR [--baud 115200]",
         "  rphsmtool abort-update [--device PATH] --session-id ID --role administrator --proof-env VAR [--baud 115200]",
@@ -654,6 +698,7 @@ pub fn all_usage_text() -> String {
         "  rphsmtool reactivate-recovered [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool recovery reactivate [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool get-random [--device PATH] --bytes N --role administrator|key-manager --proof-env VAR [--baud 115200]",
+        "  rphsmtool generate-key [--device PATH] --algorithm ed25519|chacha20poly1305 --usage sign|encrypt,decrypt --role key-manager --proof-env VAR [--baud 115200]",
         "  rphsmtool get-audit-page [--device PATH] [--start-sequence N] --max-events N [--one-line] --role administrator|recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool sign [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin",
         "  rphsmtool key sign [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin",
@@ -668,8 +713,8 @@ pub fn all_usage_text() -> String {
         "  rphsmtool key revoke [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200]",
         "  rphsmtool destroy-key [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200]",
         "  rphsmtool key destroy [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200]",
-        "  rphsmtool sym-encrypt",
-        "  rphsmtool sym-decrypt",
+        "  rphsmtool sym-encrypt [--device PATH] --key-id ID --algorithm chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < plaintext.bin",
+        "  rphsmtool sym-decrypt [--device PATH] --key-id ID --algorithm chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < ciphertext.bin",
     ]
     .join("\n")
 }
@@ -677,7 +722,7 @@ pub fn all_usage_text() -> String {
 #[cfg(test)]
 mod tests {
     use super::{CommandSpec, ParsedArgs, parse_args};
-    use crate::client::{PolicyProfileUpdate, Role};
+    use crate::client::{ManagedAlgorithm, PolicyProfileUpdate, Role};
 
     fn parse(parts: &[&str]) -> Result<ParsedArgs, super::CliError> {
         parse_args(parts.iter().map(|s| s.to_string()))
@@ -804,9 +849,27 @@ mod tests {
     }
 
     #[test]
-    fn marks_reserved_verbs_as_unsupported() {
-        let parsed = parse(&["rphsmtool", "sym-encrypt"]).expect("parse");
-        assert!(matches!(parsed.command, CommandSpec::Unsupported { .. }));
+    fn parses_generate_key() {
+        let parsed = parse(&[
+            "rphsmtool",
+            "generate-key",
+            "--algorithm",
+            "chacha20poly1305",
+            "--usage",
+            "encrypt,decrypt",
+            "--role",
+            "key-manager",
+            "--proof-env",
+            "RPHSM_KEYMG",
+        ])
+        .expect("parse");
+        assert!(matches!(
+            parsed.command,
+            CommandSpec::GenerateKey {
+                algorithm: ManagedAlgorithm::ChaCha20Poly1305,
+                ..
+            }
+        ));
     }
 
     #[test]

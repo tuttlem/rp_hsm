@@ -232,7 +232,7 @@ cargo rphsmtool developer-reboot --device /dev/ttyACM0
 cargo rphsmtool developer-store-fault --device /dev/ttyACM0 --action rollback-persisted-store
 cargo rphsmtool developer-store-fault --device /dev/ttyACM0 --action corrupt-persisted-audit
 cargo rphsmtool developer-set-policy --device /dev/ttyACM0 --dual-control on
-cargo rphsmtool provision-bootstrap --device /dev/ttyACM0 --proof-env RPHSM_PROOF
+cargo rphsmtool provision --device /dev/ttyACM0 --proof-env RPHSM_PROOF
 cargo rphsmtool auth-check --device /dev/ttyACM0 --role administrator --proof-env RPHSM_PROOF
 cargo rphsmtool lock --device /dev/ttyACM0 --role administrator --proof-env RPHSM_PROOF
 cargo rphsmtool unlock --device /dev/ttyACM0 --role administrator --proof-env RPHSM_PROOF
@@ -242,14 +242,24 @@ cargo rphsmtool enter-recovery --device /dev/ttyACM0 --role recovery --proof-env
 cargo rphsmtool recover-to-provisioned --device /dev/ttyACM0 --role recovery --proof-env RPHSM_PROOF
 cargo rphsmtool reactivate-recovered --device /dev/ttyACM0 --transition-id 7 --role recovery --proof-env RPHSM_PROOF
 cargo rphsmtool get-random --device /dev/ttyACM0 --bytes 32 --role administrator --proof-env RPHSM_PROOF
+cargo rphsmtool list-algorithms --device /dev/ttyACM0
+cargo rphsmtool generate-key --device /dev/ttyACM0 --algorithm chacha20poly1305 --usage encrypt,decrypt --role key-manager --proof-env RPHSM_PROOF
+cargo rphsmtool generate-key --device /dev/ttyACM0 --algorithm aes256gcm --usage encrypt,decrypt --role key-manager --proof-env RPHSM_PROOF
+cargo rphsmtool generate-key --device /dev/ttyACM0 --algorithm ed25519 --usage sign --role key-manager --proof-env RPHSM_PROOF
+cargo rphsmtool generate-key --device /dev/ttyACM0 --algorithm p256 --usage sign --role key-manager --proof-env RPHSM_PROOF
+cargo rphsmtool sym-encrypt --device /dev/ttyACM0 --key-id 1 --algorithm chacha20poly1305 --role key-manager --proof-env RPHSM_PROOF < plaintext.bin > ciphertext.bin
+cargo rphsmtool sym-decrypt --device /dev/ttyACM0 --key-id 1 --algorithm chacha20poly1305 --role key-manager --proof-env RPHSM_PROOF < ciphertext.bin > plaintext.out
+cargo rphsmtool sym-encrypt --device /dev/ttyACM0 --key-id 2 --algorithm aes256gcm --role key-manager --proof-env RPHSM_PROOF < plaintext.bin > ciphertext.bin
+cargo rphsmtool sym-decrypt --device /dev/ttyACM0 --key-id 2 --algorithm aes256gcm --role key-manager --proof-env RPHSM_PROOF < ciphertext.bin > plaintext.out
 cargo rphsmtool get-audit-page --device /dev/ttyACM0 --start-sequence 0 --max-events 4 --role administrator --proof-env RPHSM_PROOF
 cargo rphsmtool update-status --device /dev/ttyACM0 --role administrator --proof-env RPHSM_PROOF
 cargo rphsmtool apply-update --device /dev/ttyACM0 --image update.bin --version 1.0.0.1 --role administrator --proof-env RPHSM_PROOF
 cargo rphsmtool abort-update --device /dev/ttyACM0 --session-id 7 --role administrator --proof-env RPHSM_PROOF
 cargo rphsmtool recover-trusted-firmware --device /dev/ttyACM0 --role recovery --proof-env RPHSM_PROOF
 cargo rphsmtool developer-update-fault --device /dev/ttyACM0 --action ambiguous-firmware-activation
-cargo rphsmtool sign --device /dev/ttyACM0 --key-id 1 --role key-manager --proof-env RPHSM_PROOF < message.bin > signature.bin
+cargo rphsmtool sign --device /dev/ttyACM0 --key-id 3 --role key-manager --proof-env RPHSM_PROOF < message.bin > signature.bin
 cargo rphsmtool verify --device /dev/ttyACM0 --algorithm ed25519 --public-key-hex <HEX> --signature-hex <HEX> < message.bin
+cargo rphsmtool verify --device /dev/ttyACM0 --algorithm p256 --public-key-hex <HEX> --signature-hex <HEX> < message.bin
 cargo rphsmtool import-wrapped-key --device /dev/ttyACM0 --role key-manager --proof-env RPHSM_PROOF < envelope.bin
 cargo rphsmtool list-keys --device /dev/ttyACM0 --role key-manager --proof-env RPHSM_PROOF
 cargo rphsmtool get-key-metadata --device /dev/ttyACM0 --key-id 1 --role key-manager --proof-env RPHSM_PROOF
@@ -275,13 +285,20 @@ Behavior:
 - `developer-set-policy` toggles developer-only policy switches such as
   `dual_control_enabled` and persists the updated policy profile for later
   validation.
-- `provision-bootstrap` performs the reviewed bootstrap auth plus begin/finalize
-  provisioning flow needed to move a factory-state device into a usable state.
+- `provision` performs the reviewed bootstrap auth plus begin/finalize
+  provisioning flow needed to move a factory-state device into an operational
+  state.
+- `list-algorithms` exposes the supported managed algorithm set without
+  requiring privileged session setup.
 - `auth-check` verifies that a reviewed role can authenticate successfully
   without requiring users to construct protocol frames manually.
 - `lock`, `unlock`, `zeroize`, `logout`, recovery transitions, `sign`,
   `verify`, `import-wrapped-key`, `revoke-key`, and `destroy-key` all map to
   already-implemented firmware operations.
+- `generate-key` creates persistent managed keys for `chacha20poly1305`,
+  `aes256gcm`, `ed25519`, and `p256` with explicit usage policy.
+- `sym-encrypt` and `sym-decrypt` are supported for `chacha20poly1305` and
+  `aes256gcm` and read/write raw bytes via stdin/stdout.
 - If `--device` is omitted, `rphsmtool` auto-selects only when exactly one
   compatible device is present.
 - If multiple compatible devices are present, the command fails closed and
@@ -296,11 +313,10 @@ Behavior:
 - `developer-update-fault` injects developer-only firmware-update ambiguity or
   rollback conditions for live recovery validation.
 - `sign` writes raw signature bytes to stdout.
-- `verify` reads the message from stdin and writes `true` or `false` to stdout.
+- `verify` reads the message from stdin and writes `true` or `false` to stdout
+  for `ed25519` and `p256`.
 - Authentication proof input is taken from `--proof-env <VAR>` to avoid putting
   proof material into shell history.
-- Reserved future verbs such as `sym-encrypt` and `sym-decrypt` fail explicitly
-  instead of pretending to work before the firmware supports them.
 - Busy serial ports, missing permissions, and missing/re-enumerated device
   nodes are reported as host-side transport issues with actionable hints instead
   of being mislabeled as device authorization failures.
@@ -334,7 +350,7 @@ cargo rphsmtool developer-reset --device /dev/ttyACM0
 
 ```bash
 export RPHSM_PROOF=BOOT
-cargo rphsmtool provision-bootstrap --device /dev/ttyACM0 --proof-env RPHSM_PROOF
+cargo rphsmtool provision --device /dev/ttyACM0 --proof-env RPHSM_PROOF
 ```
 
 ```bash
