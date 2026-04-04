@@ -146,3 +146,5 @@
 - Identify which acceptance scenarios prove denial behavior, not just success behavior.
 - Call out any claimed security property that depends on hardware support rather than firmware alone.
 - Record any out-of-scope attacker capability explicitly instead of implying resistance.
+- Identify the documented user-facing surface that must be regression-tested
+  before this feature can be signed off.

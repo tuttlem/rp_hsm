@@ -13,6 +13,11 @@ that changes a trust boundary, command surface, key handling path, persistence
 format, or authorization rule. Other test tasks remain optional unless the spec
 requests broader coverage.
 
+**Regression**: Features that change firmware, persistent state, authorization,
+or the supported host/user surface MUST include bounded regression-validation
+tasks for the documented operator surface and, when applicable, live hardware
+behavior before closeout.
+
 **Organization**: Tasks are grouped by user story to enable independent implementation and testing of each story.
 
 ## Format: `[ID] [P?] [Story] Description`
@@ -160,6 +165,8 @@ Examples of foundational tasks (adjust based on your project):
 - [ ] TXXX [P] Additional unit tests (if requested) in tests/unit/
 - [ ] TXXX Security hardening and review-note updates
 - [ ] TXXX Run quickstart.md validation
+- [ ] TXXX Run the required user-surface and hardware regression validation for
+  this feature
 
 ---
 

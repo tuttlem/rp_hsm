@@ -21,6 +21,8 @@ Auto-generated from all feature plans. Last updated: 2026-04-04
 - reserved on-device flash for persisted lifecycle/key/audit state plus new firmware-update metadata and inactive image slot metadata (008-signed-firmware-update)
 - Rust stable in the existing Cargo workspace + `serialport`, `heapless`, `ed25519-dalek`, `sha2`, (009-host-tooling)
 - N/A on host; local process memory plus stdin/stdout and environment (009-host-tooling)
+- Markdown documentation plus workspace command execution in + existing Cargo workspace commands (`cargo test`, (010-hardening-release-process)
+- Repo-tracked release-process documentation and release-record (010-hardening-release-process)
 
 - Rust edition 2024 (`no_std`) + `rp235x-hal`, `embedded-hal`, `heapless`, `critical-section`; existing USB support remains transport scaffolding only (001-secure-command-protocol)
 
@@ -40,9 +42,9 @@ cargo test [ONLY COMMANDS FOR ACTIVE TECHNOLOGIES][ONLY COMMANDS FOR ACTIVE TECH
 Rust edition 2024 (`no_std`): Follow standard conventions
 
 ## Recent Changes
+- 010-hardening-release-process: Added Markdown documentation plus workspace command execution in + existing Cargo workspace commands (`cargo test`,
 - 009-host-tooling: Added Rust stable in the existing Cargo workspace + `serialport`, `heapless`, `ed25519-dalek`, `sha2`,
 - 008-signed-firmware-update: Added Rust stable workspace, embedded `no_std` firmware on RP2350 and `std` host tooling + existing workspace crates (`protocol`, `host_tools`, `firmware`), RP235x HAL, current serial host tooling, reviewed signature-verification crate for update manifests, existing flash persistence layer
-- 007-audit-trail: Added Rust stable, workspace with `no_std` firmware and host-side Rust CLI + `heapless`, `usb-device`, `usbd-serial`, existing `protocol` shared crate, host-side `serialport`
 
 
 <!-- MANUAL ADDITIONS START -->

@@ -258,6 +258,9 @@ This phase runs continuously, but it must also exist as explicit work.
 - Add malformed-input and parser abuse testing.
 - Add persistence corruption tests.
 - Add replay, reordering, and authorization bypass tests.
+- Maintain repo-tracked release evidence, hardening matrices, artifact identity,
+  dependency review, build review, and scoped exception records as part of the
+  release process.
 - Add state machine invariant testing.
 - Review fault handling and interruption behavior.
 - Review side-channel exposure where relevant.

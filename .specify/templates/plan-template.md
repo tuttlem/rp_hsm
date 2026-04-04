@@ -37,6 +37,8 @@
 - Every externally reachable interface is justified, minimized, and privilege-scoped.
 - Negative tests and misuse cases are defined alongside success-path validation.
 - Release-build, review, and deployment constraints for this feature are captured.
+- Required regression validation is identified for the documented user-facing
+  surface and, when applicable, for live hardware behavior.
 
 ## Project Structure
 

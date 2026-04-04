@@ -22,6 +22,33 @@ Do not treat `probe_protocol` output as a stable integration API. It is meant
 to exercise the device aggressively during development, not to be the default
 operator or application boundary.
 
+## Release Readiness
+
+Release approval is evidence-based and fail-closed. A candidate is not ready
+because it "seems done"; it is ready only when a repo-tracked release record
+identifies the exact artifact, the exact source revision, the required
+validation evidence, the hardening coverage, and any explicit exceptions.
+
+The release-process artifacts live under
+[`specs/010-hardening-release-process`](/home/michael/src/embedded/rp_hsm/specs/010-hardening-release-process).
+Use these files when preparing a candidate:
+
+- [release-evidence-template.md](/home/michael/src/embedded/rp_hsm/specs/010-hardening-release-process/release-evidence-template.md)
+- [hardening-matrix-template.md](/home/michael/src/embedded/rp_hsm/specs/010-hardening-release-process/hardening-matrix-template.md)
+- [release-exception-template.md](/home/michael/src/embedded/rp_hsm/specs/010-hardening-release-process/release-exception-template.md)
+- [approved-artifact-template.md](/home/michael/src/embedded/rp_hsm/specs/010-hardening-release-process/approved-artifact-template.md)
+- [release-readiness-checklist.md](/home/michael/src/embedded/rp_hsm/specs/010-hardening-release-process/release-readiness-checklist.md)
+
+Minimum release expectations:
+
+- artifact identity must be complete
+- required workspace validation must be recorded
+- required hardware validation must be recorded when the candidate touches
+  hardware-facing security behavior
+- every hardening class must be visible and judged directly
+- dependency review and build review must be recorded
+- missing evidence blocks approval unless an explicit scoped exception exists
+
 ## Common Commands
 
 ### Build firmware
@@ -229,6 +256,13 @@ cargo rphsmtool get-key-metadata --device /dev/ttyACM0 --key-id 1 --role key-man
 cargo rphsmtool revoke-key --device /dev/ttyACM0 --key-id 1 --role key-manager --proof-env RPHSM_PROOF
 cargo rphsmtool destroy-key --device /dev/ttyACM0 --key-id 1 --role key-manager --proof-env RPHSM_PROOF
 ```
+
+Future feature work should update the release evidence set when it changes:
+
+- required validation commands
+- required hardware walkthroughs
+- hardening classes or evidence sources
+- operator or reviewer guidance
 
 Behavior:
 

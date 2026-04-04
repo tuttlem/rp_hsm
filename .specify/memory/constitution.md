@@ -1,15 +1,10 @@
 <!--
 Sync Impact Report
-- Version change: template -> 1.0.0
+- Version change: 1.0.0 -> 1.1.0
 - Modified principles:
-  - Principle 1 -> I. Fail-Safe Security Boundaries
-  - Principle 2 -> II. Explicit Secret Lifecycle Control
   - Principle 3 -> III. Deterministic and Verifiable Firmware
-  - Principle 4 -> IV. Minimal Attack Surface by Default
-  - Principle 5 -> V. Auditability and Reviewable Design
 - Added sections:
-  - Security Requirements
-  - Development Workflow & Quality Gates
+  - None
 - Removed sections:
   - None
 - Templates requiring updates:
@@ -44,8 +39,12 @@ Firmware behavior and build outputs MUST be reproducible and reviewable.
 Security-critical code MUST prefer deterministic state machines, bounded memory,
 constant-time primitives where applicable, and explicit error handling over
 implicit convenience patterns. Release artifacts MUST be built with hardened
-settings and verified before deployment. Rationale: if behavior cannot be
-predicted and reproduced, it cannot be audited with confidence.
+settings and verified before deployment. A feature MUST NOT be considered
+complete until its documented user-facing surface has been regression-tested,
+and firmware-affecting features MUST include a bounded live hardware regression
+before sign-off unless the absence of hardware validation is explicitly
+recorded. Rationale: if behavior cannot be predicted, reproduced, and
+revalidated from the operator surface, it cannot be audited with confidence.
 
 ### IV. Minimal Attack Surface by Default
 Only the smallest set of transports, commands, privileges, and dependencies
@@ -93,6 +92,18 @@ before implementation begins. The check MUST confirm:
 - all externally reachable interfaces are justified and minimized
 - negative tests and misuse cases are specified alongside success scenarios
 - release-build and review expectations are captured for the feature
+- required regression validation is identified for the documented user-facing
+  surface and, when applicable, for live hardware behavior
+
+Feature completion and sign-off MUST distinguish:
+
+- software validation
+- feature-specific validation
+- regression validation
+
+When a feature changes firmware, persistent state, authorization, or the
+supported host/user surface, the task plan MUST include the bounded regression
+work needed to prove previously supported operator workflows still function.
 
 Tasks MUST include the work needed for malformed-input handling, abuse-case
 tests, interface hardening, and documentation updates when the feature changes a
@@ -114,4 +125,4 @@ task generation, and code review. Any justified exception MUST be recorded in
 the feature plan's Complexity Tracking section with the simpler alternative that
 was rejected and the security reason it was insufficient.
 
-**Version**: 1.0.0 | **Ratified**: 2026-04-01 | **Last Amended**: 2026-04-01
+**Version**: 1.1.0 | **Ratified**: 2026-04-01 | **Last Amended**: 2026-04-04

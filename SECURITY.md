@@ -22,6 +22,34 @@ This repository is for a constrained embedded target, not a certified HSM. That 
 - No feature that mixes debug convenience with production behavior.
 - No secret material in unit-test fixtures, example code, or committed logs.
 
+## Release Review Baseline
+
+- Release approval is evidence-based and fail-closed.
+- Missing artifact identity, missing hardening coverage, missing dependency
+  review, or missing build review blocks approval.
+- A happy-path demo does not compensate for omitted parser, misuse,
+  invalid-state, corruption, recovery, or supply/build review classes.
+- Exceptions must be explicit, candidate-scoped, approved, and visible in the
+  final artifact record.
+
+## Dependency and Build Review
+
+- Review `Cargo.lock` changes when present.
+- Review changed crate manifests, build flags, and tooling inputs.
+- Call out crates or configuration changes that affect parsing, cryptography,
+  persistence, transport, audit, update trust, or host-side security posture.
+- Record the exact build commands and resulting artifact identity used for the
+  release candidate.
+
+## Evidence Handling
+
+- Do not place plaintext proofs, raw credentials, or unnecessary secret-bearing
+  serial captures into release records.
+- Prefer exact commands, bounded result summaries, and artifact hashes over raw
+  logs unless a reviewer explicitly needs the raw output.
+- Keep unresolved blockers and carried exceptions visible until the final
+  decision is recorded.
+
 ## Next implementation priorities
 
 1. Replace the demo loop with a versioned command dispatcher that rejects unknown or malformed messages by default.
