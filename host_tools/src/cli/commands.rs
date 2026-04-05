@@ -334,6 +334,25 @@ pub fn execute(parsed: ParsedArgs) -> Result<CommandOutput, CliError> {
                 .sym_decrypt(&proof, key_id, algorithm, &nonce, &ciphertext)?;
             Ok(CommandOutput::Bytes(plaintext))
         }
+        CommandSpec::AsymEncrypt { key_id, algorithm, auth } => {
+            let proof = load_proof(&auth)?;
+            let plaintext = read_stdin_required()?;
+            let devices = discover_devices(parsed.global.baud)?;
+            let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
+            let result = SerialBackend::new(crate::client::ClientConfig::new(selected, parsed.global.baud))
+                .asym_encrypt(&proof, key_id, algorithm, &plaintext)?;
+            Ok(CommandOutput::Bytes(encode_symmetric_blob(&result.nonce, &result.ciphertext)?))
+        }
+        CommandSpec::AsymDecrypt { key_id, algorithm, auth } => {
+            let proof = load_proof(&auth)?;
+            let blob = read_stdin_required()?;
+            let (envelope_header, ciphertext) = decode_symmetric_blob(&blob)?;
+            let devices = discover_devices(parsed.global.baud)?;
+            let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
+            let plaintext = SerialBackend::new(crate::client::ClientConfig::new(selected, parsed.global.baud))
+                .asym_decrypt(&proof, key_id, algorithm, &envelope_header, &ciphertext)?;
+            Ok(CommandOutput::Bytes(plaintext))
+        }
         CommandSpec::GetAuditPage {
             start_sequence,
             max_events,
@@ -799,6 +818,7 @@ fn algorithm_name(value: u8) -> &'static str {
         0x02 => "p256",
         0x03 => "chacha20poly1305",
         0x04 => "aes256gcm",
+        0x05 => "x25519-chacha20poly1305",
         _ => "unknown",
     }
 }

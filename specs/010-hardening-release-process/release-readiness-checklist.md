@@ -14,12 +14,14 @@ Use this checklist before marking a candidate approved.
 - [ ] Required workspace validation commands were run
 - [ ] Results are recorded for every required command
 - [ ] Hardware validation is recorded when the candidate touches hardware-facing behavior
+- [ ] Documented `rphsmtool` regression was run when the operator surface changed
 - [ ] No secret-bearing material appears in the evidence set
 
 ## Hardening Coverage
 
 - [ ] Parser abuse and malformed-input coverage is recorded
 - [ ] Authorization and misuse coverage is recorded
+- [ ] New crypto-envelope parsing and denial coverage is recorded when the candidate adds or changes encrypt/decrypt surfaces
 - [ ] Invalid-state handling coverage is recorded
 - [ ] Persistence corruption and recovery coverage is recorded
 - [ ] Firmware update recovery coverage is recorded when applicable

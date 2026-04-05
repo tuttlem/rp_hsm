@@ -1,6 +1,6 @@
 # rp_hsm Development Guidelines
 
-Auto-generated from all feature plans. Last updated: 2026-04-04
+Auto-generated from all feature plans. Last updated: 2026-04-05
 
 ## Active Technologies
 - Rust edition 2024 with `no_std` firmware and host-side Rust tooling + `rp235x-hal`, `embedded-hal`, `heapless`, `critical-section`, shared `protocol` crate, existing `usb-device`/`usbd-serial` debug transport for development (002-device-state-provisioning)
@@ -25,6 +25,7 @@ Auto-generated from all feature plans. Last updated: 2026-04-04
 - Repo-tracked release-process documentation and release-record (010-hardening-release-process)
 - Rust 2024 + `rp235x-hal`, `heapless`, `serialport`, `ed25519-dalek`, `chacha20poly1305`, `sha2`, `rand_core`, `rand_chacha` (015-basic-hsm-ops)
 - RP2350 flash-backed persistent state and key metadata snapshots (015-basic-hsm-ops)
+- Rust 2024 + `rp235x-hal`, `heapless`, `serialport`, `p256`, `chacha20poly1305`, `sha2`, plus planned `x25519-dalek` and `hkdf` for the first shipping asymmetric-encryption profile (016-asymmetric-encryption)
 
 - Rust edition 2024 (`no_std`) + `rp235x-hal`, `embedded-hal`, `heapless`, `critical-section`; existing USB support remains transport scaffolding only (001-secure-command-protocol)
 
@@ -44,9 +45,9 @@ cargo test [ONLY COMMANDS FOR ACTIVE TECHNOLOGIES][ONLY COMMANDS FOR ACTIVE TECH
 Rust edition 2024 (`no_std`): Follow standard conventions
 
 ## Recent Changes
+- 016-asymmetric-encryption: Added Rust 2024 + `rp235x-hal`, `heapless`, `serialport`, `p256`, `chacha20poly1305`, `sha2`, plus planned `x25519-dalek` and `hkdf` for the first shipping asymmetric-encryption profile
 - 015-basic-hsm-ops: Added Rust 2024 + `rp235x-hal`, `heapless`, `serialport`, `ed25519-dalek`, `chacha20poly1305`, `sha2`, `rand_core`, `rand_chacha`
 - 010-hardening-release-process: Added Markdown documentation plus workspace command execution in + existing Cargo workspace commands (`cargo test`,
-- 009-host-tooling: Added Rust stable in the existing Cargo workspace + `serialport`, `heapless`, `ed25519-dalek`, `sha2`,
 
 
 <!-- MANUAL ADDITIONS START -->

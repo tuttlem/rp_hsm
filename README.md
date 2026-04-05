@@ -247,10 +247,13 @@ cargo rphsmtool generate-key --device /dev/ttyACM0 --algorithm chacha20poly1305 
 cargo rphsmtool generate-key --device /dev/ttyACM0 --algorithm aes256gcm --usage encrypt,decrypt --role key-manager --proof-env RPHSM_PROOF
 cargo rphsmtool generate-key --device /dev/ttyACM0 --algorithm ed25519 --usage sign --role key-manager --proof-env RPHSM_PROOF
 cargo rphsmtool generate-key --device /dev/ttyACM0 --algorithm p256 --usage sign --role key-manager --proof-env RPHSM_PROOF
-cargo rphsmtool sym-encrypt --device /dev/ttyACM0 --key-id 1 --algorithm chacha20poly1305 --role key-manager --proof-env RPHSM_PROOF < plaintext.bin > ciphertext.bin
-cargo rphsmtool sym-decrypt --device /dev/ttyACM0 --key-id 1 --algorithm chacha20poly1305 --role key-manager --proof-env RPHSM_PROOF < ciphertext.bin > plaintext.out
-cargo rphsmtool sym-encrypt --device /dev/ttyACM0 --key-id 2 --algorithm aes256gcm --role key-manager --proof-env RPHSM_PROOF < plaintext.bin > ciphertext.bin
-cargo rphsmtool sym-decrypt --device /dev/ttyACM0 --key-id 2 --algorithm aes256gcm --role key-manager --proof-env RPHSM_PROOF < ciphertext.bin > plaintext.out
+cargo rphsmtool generate-key --device /dev/ttyACM0 --algorithm x25519-chacha20poly1305 --usage encrypt,decrypt --role key-manager --proof-env RPHSM_PROOF
+cargo rphsmtool sym-encrypt --device /dev/ttyACM0 --key-id <RETURNED KEY_ID> --algorithm chacha20poly1305 --role key-manager --proof-env RPHSM_PROOF < plaintext.bin > ciphertext.bin
+cargo rphsmtool sym-decrypt --device /dev/ttyACM0 --key-id <RETURNED KEY_ID> --algorithm chacha20poly1305 --role key-manager --proof-env RPHSM_PROOF < ciphertext.bin > plaintext.out
+cargo rphsmtool sym-encrypt --device /dev/ttyACM0 --key-id <RETURNED KEY_ID> --algorithm aes256gcm --role key-manager --proof-env RPHSM_PROOF < plaintext.bin > ciphertext.bin
+cargo rphsmtool sym-decrypt --device /dev/ttyACM0 --key-id <RETURNED KEY_ID> --algorithm aes256gcm --role key-manager --proof-env RPHSM_PROOF < ciphertext.bin > plaintext.out
+cargo rphsmtool asym-encrypt --device /dev/ttyACM0 --key-id <RETURNED KEY_ID> --algorithm x25519-chacha20poly1305 --role key-manager --proof-env RPHSM_PROOF < plaintext.bin > asym-cipher.bin
+cargo rphsmtool asym-decrypt --device /dev/ttyACM0 --key-id <RETURNED KEY_ID> --algorithm x25519-chacha20poly1305 --role key-manager --proof-env RPHSM_PROOF < asym-cipher.bin > plaintext.out
 cargo rphsmtool get-audit-page --device /dev/ttyACM0 --start-sequence 0 --max-events 4 --role administrator --proof-env RPHSM_PROOF
 cargo rphsmtool update-status --device /dev/ttyACM0 --role administrator --proof-env RPHSM_PROOF
 cargo rphsmtool apply-update --device /dev/ttyACM0 --image update.bin --version 1.0.0.1 --role administrator --proof-env RPHSM_PROOF
@@ -266,6 +269,10 @@ cargo rphsmtool get-key-metadata --device /dev/ttyACM0 --key-id 1 --role key-man
 cargo rphsmtool revoke-key --device /dev/ttyACM0 --key-id 1 --role key-manager --proof-env RPHSM_PROOF
 cargo rphsmtool destroy-key --device /dev/ttyACM0 --key-id 1 --role key-manager --proof-env RPHSM_PROOF
 ```
+
+For key-generation workflows, use the `key_id` returned by `generate-key`
+rather than assuming fixed ids. The quickstarts use `<RETURNED KEY_ID>` for the
+same reason.
 
 Future feature work should update the release evidence set when it changes:
 
@@ -290,6 +297,9 @@ Behavior:
   state.
 - `list-algorithms` exposes the supported managed algorithm set without
   requiring privileged session setup.
+- `asym-encrypt` and `asym-decrypt` use the first shipping recipient profile,
+  `x25519-chacha20poly1305`, and operate on the managed recipient `key_id`
+  returned by `generate-key`.
 - `auth-check` verifies that a reviewed role can authenticate successfully
   without requiring users to construct protocol frames manually.
 - `lock`, `unlock`, `zeroize`, `logout`, recovery transitions, `sign`,

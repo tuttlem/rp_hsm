@@ -243,6 +243,7 @@ pub enum ManagedAlgorithm {
     P256 = 0x02,
     ChaCha20Poly1305 = 0x03,
     Aes256Gcm = 0x04,
+    X25519ChaCha20Poly1305 = 0x05,
 }
 
 impl ManagedAlgorithm {
@@ -255,6 +256,9 @@ impl ManagedAlgorithm {
             "p256" => Ok(Self::P256),
             "chacha20poly1305" | "chacha20-poly1305" => Ok(Self::ChaCha20Poly1305),
             "aes256gcm" | "aes-256-gcm" => Ok(Self::Aes256Gcm),
+            "x25519-chacha20poly1305" | "x25519chacha20poly1305" => {
+                Ok(Self::X25519ChaCha20Poly1305)
+            }
             _ => Err(CliError::usage("invalid algorithm value")),
         }
     }
@@ -763,8 +767,17 @@ impl SerialBackend {
         nonce: &[u8],
         ciphertext: &[u8],
     ) -> Result<Vec<u8>, CliError> {
-        if nonce.len() != 12 {
-            return Err(CliError::usage("nonce must be exactly 12 bytes"));
+        let expected_nonce_len = match algorithm {
+            ManagedAlgorithm::ChaCha20Poly1305 | ManagedAlgorithm::Aes256Gcm => 12,
+            ManagedAlgorithm::X25519ChaCha20Poly1305 => 44,
+            ManagedAlgorithm::Ed25519 | ManagedAlgorithm::P256 => {
+                return Err(CliError::usage("invalid algorithm for decrypt"));
+            }
+        };
+        if nonce.len() != expected_nonce_len {
+            return Err(CliError::usage(format!(
+                "nonce must be exactly {expected_nonce_len} bytes"
+            )));
         }
         if ciphertext.len() < 16 || ciphertext.len() > 144 {
             return Err(CliError::usage("ciphertext must be between 16 and 144 bytes"));
@@ -785,6 +798,46 @@ impl SerialBackend {
         let response = exchange_authorized(&mut *port, &mut session, 0x95, 0x02, &inner)?;
         ensure_status(&response, StatusCode::Success)?;
         decode_decrypt_response(response.payload.as_slice())
+    }
+
+    /// # Errors
+    ///
+    /// Returns `CliError` when asymmetric encryption fails.
+    pub fn asym_encrypt(
+        &self,
+        proof: &[u8],
+        key_id: u8,
+        algorithm: ManagedAlgorithm,
+        plaintext: &[u8],
+    ) -> Result<EncryptResult, CliError> {
+        if algorithm != ManagedAlgorithm::X25519ChaCha20Poly1305 {
+            return Err(CliError::usage(
+                "invalid asymmetric encryption algorithm for asym-encrypt",
+            ));
+        }
+        self.sym_encrypt(proof, key_id, algorithm, plaintext)
+    }
+
+    /// # Errors
+    ///
+    /// Returns `CliError` when asymmetric decryption fails.
+    pub fn asym_decrypt(
+        &self,
+        proof: &[u8],
+        key_id: u8,
+        algorithm: ManagedAlgorithm,
+        envelope_header: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, CliError> {
+        if algorithm != ManagedAlgorithm::X25519ChaCha20Poly1305 {
+            return Err(CliError::usage(
+                "invalid asymmetric encryption algorithm for asym-decrypt",
+            ));
+        }
+        if envelope_header.len() != 44 {
+            return Err(CliError::usage("asymmetric envelope header must be exactly 44 bytes"));
+        }
+        self.sym_decrypt(proof, key_id, algorithm, envelope_header, ciphertext)
     }
 
     /// # Errors

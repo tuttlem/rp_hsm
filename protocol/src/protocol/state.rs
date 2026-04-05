@@ -23,6 +23,7 @@ pub const ED25519_PUBLIC_KEY_LEN: usize = 32;
 pub const ED25519_SIGNATURE_LEN: usize = 64;
 pub const P256_PUBLIC_KEY_LEN: usize = 33;
 pub const P256_SIGNATURE_LEN: usize = 64;
+pub const X25519_PUBLIC_KEY_LEN: usize = 32;
 pub const MAX_PUBLIC_MATERIAL_LEN: usize = P256_PUBLIC_KEY_LEN;
 pub const CHACHA20POLY1305_KEY_LEN: usize = 32;
 pub const CHACHA20POLY1305_NONCE_LEN: usize = 12;
@@ -31,6 +32,8 @@ pub const AES256GCM_KEY_LEN: usize = 32;
 pub const AES256GCM_NONCE_LEN: usize = 12;
 pub const AES256GCM_TAG_LEN: usize = 16;
 pub const MAX_CIPHERTEXT_LEN: usize = MAX_CRYPTO_MESSAGE_LEN + CHACHA20POLY1305_TAG_LEN;
+pub const X25519_ENVELOPE_HEADER_LEN: usize = X25519_PUBLIC_KEY_LEN + CHACHA20POLY1305_NONCE_LEN;
+pub const MAX_ENCRYPT_HEADER_LEN: usize = X25519_ENVELOPE_HEADER_LEN;
 pub const MAX_RANDOM_OUTPUT_LEN: usize = 64;
 pub const MAX_WRAPPED_CIPHERTEXT_LEN: usize = 32;
 pub const MAX_WRAPPED_TAG_LEN: usize = 28;
@@ -44,7 +47,7 @@ pub const SERVICE_FLAG_ENCRYPT: u8 = 0x20;
 pub const SERVICE_FLAG_DECRYPT: u8 = 0x40;
 pub const SIGNATURE_ALGORITHM_FLAGS: u8 = 0x01;
 pub const VERIFY_ALGORITHM_FLAGS: u8 = 0x03;
-pub const ENCRYPT_ALGORITHM_FLAGS: u8 = 0x03;
+pub const ENCRYPT_ALGORITHM_FLAGS: u8 = 0x07;
 pub const USAGE_SIGN: u8 = 0x01;
 pub const USAGE_VERIFY: u8 = 0x02;
 pub const USAGE_ENCRYPT: u8 = 0x04;
@@ -1083,6 +1086,7 @@ pub enum KeyAlgorithm {
     P256 = 0x02,
     ChaCha20Poly1305 = 0x03,
     Aes256Gcm = 0x04,
+    X25519ChaCha20Poly1305 = 0x05,
 }
 
 impl KeyAlgorithm {
@@ -1093,6 +1097,7 @@ impl KeyAlgorithm {
             0x02 => Some(Self::P256),
             0x03 => Some(Self::ChaCha20Poly1305),
             0x04 => Some(Self::Aes256Gcm),
+            0x05 => Some(Self::X25519ChaCha20Poly1305),
             _ => None,
         }
     }
@@ -1424,13 +1429,13 @@ pub struct EncryptRequest {
 pub struct DecryptRequest {
     pub key_id: u8,
     pub algorithm: KeyAlgorithm,
-    pub nonce: Vec<u8, CHACHA20POLY1305_NONCE_LEN>,
+    pub nonce: Vec<u8, MAX_ENCRYPT_HEADER_LEN>,
     pub ciphertext: Vec<u8, MAX_CIPHERTEXT_LEN>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EncryptResponse {
-    pub nonce: Vec<u8, CHACHA20POLY1305_NONCE_LEN>,
+    pub nonce: Vec<u8, MAX_ENCRYPT_HEADER_LEN>,
     pub ciphertext: Vec<u8, MAX_CIPHERTEXT_LEN>,
 }
 
@@ -1452,8 +1457,7 @@ pub const ALGORITHM_OP_VERIFY: u8 = 0x04;
 pub const ALGORITHM_OP_ENCRYPT: u8 = 0x08;
 pub const ALGORITHM_OP_DECRYPT: u8 = 0x10;
 pub const ALGORITHM_OP_WRAPPED_IMPORT: u8 = 0x20;
-pub const MAX_ALGORITHM_PROFILES: usize = 4;
-
+pub const MAX_ALGORITHM_PROFILES: usize = 5;
 pub const REVIEWED_ALGORITHM_PROFILES: [AlgorithmProfile; MAX_ALGORITHM_PROFILES] = [
     AlgorithmProfile {
         algorithm: KeyAlgorithm::Ed25519,
@@ -1477,6 +1481,11 @@ pub const REVIEWED_ALGORITHM_PROFILES: [AlgorithmProfile; MAX_ALGORITHM_PROFILES
         algorithm: KeyAlgorithm::Aes256Gcm,
         operation_mask: ALGORITHM_OP_GENERATE | ALGORITHM_OP_ENCRYPT | ALGORITHM_OP_DECRYPT,
         public_material_len: 0,
+    },
+    AlgorithmProfile {
+        algorithm: KeyAlgorithm::X25519ChaCha20Poly1305,
+        operation_mask: ALGORITHM_OP_GENERATE | ALGORITHM_OP_ENCRYPT | ALGORITHM_OP_DECRYPT,
+        public_material_len: 32,
     },
 ];
 
@@ -2393,6 +2402,11 @@ impl PersistentKeyStore {
             KeyAlgorithm::P256 => p256_public_key_from_secret(record.material.material_bytes.as_slice())
                 .and_then(|bytes| Vec::from_slice(&bytes).ok())
                 .unwrap_or_default(),
+            KeyAlgorithm::X25519ChaCha20Poly1305 => {
+                x25519_public_key_from_secret(record.material.material_bytes.as_slice())
+                    .and_then(|bytes| Vec::from_slice(&bytes).ok())
+                    .unwrap_or_default()
+            }
             KeyAlgorithm::ChaCha20Poly1305 | KeyAlgorithm::Aes256Gcm => {
                 Vec::new()
             }
@@ -2739,6 +2753,16 @@ pub fn p256_public_key_from_secret(secret: &[u8]) -> Option<[u8; P256_PUBLIC_KEY
         .try_into()
         .ok()?;
     Some(encoded)
+}
+
+#[must_use]
+pub fn x25519_public_key_from_secret(secret: &[u8]) -> Option<[u8; X25519_PUBLIC_KEY_LEN]> {
+    if secret.len() != MAX_KEY_MATERIAL_LEN {
+        return None;
+    }
+    let secret: [u8; X25519_PUBLIC_KEY_LEN] = secret.try_into().ok()?;
+    let secret = x25519_dalek::StaticSecret::from(secret);
+    Some(x25519_dalek::PublicKey::from(&secret).to_bytes())
 }
 
 pub fn clear_secret_array<const N: usize>(buffer: &mut [u8; N]) {

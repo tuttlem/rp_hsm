@@ -60,6 +60,12 @@ mod public_verification;
 mod random_generation;
 #[path = "protocol/generated_symmetric_ops.rs"]
 mod generated_symmetric_ops;
+#[path = "protocol/asymmetric_key_generation.rs"]
+mod asymmetric_key_generation;
+#[path = "protocol/asymmetric_encryption.rs"]
+mod asymmetric_encryption;
+#[path = "protocol/asymmetric_decryption.rs"]
+mod asymmetric_decryption;
 #[path = "protocol/wrapped_import.rs"]
 mod wrapped_import;
 #[path = "protocol/high_risk_denials.rs"]

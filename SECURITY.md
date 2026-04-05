@@ -12,6 +12,7 @@ This repository is for a constrained embedded target, not a certified HSM. That 
 - Minimize unsafe surface area. Any `unsafe` usage must be narrowly scoped, justified in comments, and reviewed as a security-sensitive change.
 - Zeroize secrets on every exit path. Temporary key material and plaintext buffers must be cleared as soon as they are no longer needed.
 - Authenticate before use. Command handlers must validate framing, length, version, permissions, and authorization state before touching sensitive operations.
+- Treat envelope parsing as hostile input. Wrapped-key, firmware-update, symmetric-ciphertext, and asymmetric-ciphertext envelopes must be length-bounded and rejected on ambiguity.
 - Make state transitions explicit. Security-relevant state machines should be encoded as enums and reviewed for impossible or skipped transitions.
 - Keep release builds reproducible and hardened. Shipping images should use aborting panics, LTO, stripped symbols, and overflow checks.
 
@@ -19,6 +20,7 @@ This repository is for a constrained embedded target, not a certified HSM. That 
 
 - No `unwrap`, `expect`, `todo`, `dbg!`, or intentional panics in security-sensitive paths.
 - No new transport or storage format without bounds checking, negative tests, and malformed-input handling.
+- No new managed crypto operation without explicit usage binding, readable denial paths, and hardware regression against the user-facing CLI.
 - No feature that mixes debug convenience with production behavior.
 - No secret material in unit-test fixtures, example code, or committed logs.
 

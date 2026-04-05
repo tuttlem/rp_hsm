@@ -734,7 +734,7 @@ pub const DECRYPT: CommandDefinition = CommandDefinition {
     id: CommandId::Decrypt,
     family: CommandFamily::Crypto,
     min_payload_len: AUTH_HEADER_LEN + 1 + 1 + 1 + 12 + 2 + 1,
-    max_payload_len: AUTH_HEADER_LEN + 1 + 1 + 1 + 12 + 2 + 144,
+    max_payload_len: AUTH_HEADER_LEN + 1 + 1 + 1 + 44 + 2 + 144,
     allowed_device_states: OPERATIONAL_ONLY,
     required_role: AuthorityRole::KeyManager,
     replay_policy: ReplayPolicy::SingleUse,

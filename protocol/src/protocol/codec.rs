@@ -16,9 +16,9 @@ use super::state::{
     KeyMaterialEnvelope, KeyMetadataView, KeyOrigin, KeyRecordResult, KeyStoreStatus,
     LifecycleStatus, LockResult, MAX_ALGORITHM_PROFILES, MAX_CIPHERTEXT_LEN,
     MAX_CRYPTO_MESSAGE_LEN, MAX_FIRMWARE_CHUNK_LEN, MAX_FIRMWARE_SIGNATURE_LEN,
-    MAX_RANDOM_OUTPUT_LEN, MAX_SIGNATURE_LEN, MAX_WRAPPED_CIPHERTEXT_LEN, MAX_WRAPPED_TAG_LEN,
-    P256_PUBLIC_KEY_LEN, PolicyProfile, PutPersistentKeyRequest, RandomRequest, RecoveryResult,
-    SessionState, SessionStatus, SignRequest, StateRevision, TransitionResult,
+    MAX_ENCRYPT_HEADER_LEN, MAX_RANDOM_OUTPUT_LEN, MAX_SIGNATURE_LEN, MAX_WRAPPED_CIPHERTEXT_LEN,
+    MAX_WRAPPED_TAG_LEN, P256_PUBLIC_KEY_LEN, PolicyProfile, PutPersistentKeyRequest,
+    RandomRequest, RecoveryResult, SessionState, SessionStatus, SignRequest, StateRevision, TransitionResult,
     UPDATE_MANIFEST_VERSION, VerifyRequest, ZeroizeOutcome,
 };
 
@@ -854,7 +854,12 @@ pub fn decode_decrypt_request(payload: &[u8]) -> Result<DecryptRequest, StatusCo
     let key_id = payload[0];
     let algorithm = KeyAlgorithm::from_byte(payload[1]).ok_or(StatusCode::ValidationError)?;
     let nonce_len = usize::from(payload[2]);
-    if nonce_len != CHACHA20POLY1305_NONCE_LEN {
+    let expected_nonce_len = match algorithm {
+        KeyAlgorithm::ChaCha20Poly1305 | KeyAlgorithm::Aes256Gcm => CHACHA20POLY1305_NONCE_LEN,
+        KeyAlgorithm::X25519ChaCha20Poly1305 => MAX_ENCRYPT_HEADER_LEN,
+        KeyAlgorithm::Ed25519 | KeyAlgorithm::P256 => return Err(StatusCode::ValidationError),
+    };
+    if nonce_len != expected_nonce_len {
         return Err(StatusCode::ValidationError);
     }
     let ciphertext_len_index = 3 + nonce_len;
@@ -871,7 +876,7 @@ pub fn decode_decrypt_request(payload: &[u8]) -> Result<DecryptRequest, StatusCo
     {
         return Err(StatusCode::ValidationError);
     }
-    let mut nonce = Vec::<u8, CHACHA20POLY1305_NONCE_LEN>::new();
+    let mut nonce = Vec::<u8, MAX_ENCRYPT_HEADER_LEN>::new();
     nonce
         .extend_from_slice(&payload[3..3 + nonce_len])
         .map_err(|()| StatusCode::ValidationError)?;

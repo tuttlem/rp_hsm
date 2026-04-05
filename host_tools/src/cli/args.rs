@@ -43,6 +43,8 @@ pub enum CommandSpec {
     GenerateKey { algorithm: ManagedAlgorithm, usage: String, auth: AuthOptions },
     SymEncrypt { key_id: u8, algorithm: ManagedAlgorithm, auth: AuthOptions },
     SymDecrypt { key_id: u8, algorithm: ManagedAlgorithm, auth: AuthOptions },
+    AsymEncrypt { key_id: u8, algorithm: ManagedAlgorithm, auth: AuthOptions },
+    AsymDecrypt { key_id: u8, algorithm: ManagedAlgorithm, auth: AuthOptions },
     GetAuditPage {
         start_sequence: u32,
         max_events: u8,
@@ -469,6 +471,18 @@ fn build_command(
                 .ok_or_else(|| CliError::usage("missing --algorithm for sym-decrypt"))?,
             auth: parse_auth(role, proof_env, &[Role::KeyManager])?,
         }),
+        "asym-encrypt" => Ok(CommandSpec::AsymEncrypt {
+            key_id: key_id.ok_or_else(|| CliError::usage("missing --key-id for asym-encrypt"))?,
+            algorithm: managed_algorithm
+                .ok_or_else(|| CliError::usage("missing --algorithm for asym-encrypt"))?,
+            auth: parse_auth(role, proof_env, &[Role::KeyManager])?,
+        }),
+        "asym-decrypt" => Ok(CommandSpec::AsymDecrypt {
+            key_id: key_id.ok_or_else(|| CliError::usage("missing --key-id for asym-decrypt"))?,
+            algorithm: managed_algorithm
+                .ok_or_else(|| CliError::usage("missing --algorithm for asym-decrypt"))?,
+            auth: parse_auth(role, proof_env, &[Role::KeyManager])?,
+        }),
         "get-audit-page" | "audit-page" => Ok(CommandSpec::GetAuditPage {
             start_sequence: start_sequence.unwrap_or(0),
             max_events: max_events.ok_or_else(|| CliError::usage("missing --max-events for get-audit-page"))?,
@@ -580,7 +594,7 @@ fn command_usage(command: &str, show_all_help: bool) -> String {
         "recover-to-provisioned" => "Usage: rphsmtool recover-to-provisioned [--device PATH] --role recovery --proof-env VAR [--baud 115200]".into(),
         "reactivate-recovered" => "Usage: rphsmtool reactivate-recovered [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]".into(),
         "get-random" => "Usage: rphsmtool get-random [--device PATH] --bytes N --role administrator|key-manager --proof-env VAR [--baud 115200]".into(),
-        "generate-key" => "Usage: rphsmtool generate-key [--device PATH] --algorithm ed25519|chacha20poly1305 --usage sign|encrypt,decrypt --role key-manager --proof-env VAR [--baud 115200]".into(),
+        "generate-key" => "Usage: rphsmtool generate-key [--device PATH] --algorithm ed25519|p256|chacha20poly1305|aes256gcm|x25519-chacha20poly1305 --usage sign|encrypt,decrypt --role key-manager --proof-env VAR [--baud 115200]".into(),
         "get-audit-page" => "Usage: rphsmtool get-audit-page [--device PATH] [--start-sequence N] --max-events N [--one-line] --role administrator|recovery --proof-env VAR [--baud 115200]".into(),
         "sign" => "Usage: rphsmtool sign [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin".into(),
         "verify" => "Usage: rphsmtool verify [--device PATH] --algorithm ed25519|p256 --public-key-hex HEX --signature-hex HEX [--baud 115200] < message.bin".into(),
@@ -591,6 +605,8 @@ fn command_usage(command: &str, show_all_help: bool) -> String {
         "destroy-key" => "Usage: rphsmtool destroy-key [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200]".into(),
         "sym-encrypt" => "Usage: rphsmtool sym-encrypt [--device PATH] --key-id ID --algorithm chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < plaintext.bin".into(),
         "sym-decrypt" => "Usage: rphsmtool sym-decrypt [--device PATH] --key-id ID --algorithm chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < ciphertext.bin".into(),
+        "asym-encrypt" => "Usage: rphsmtool asym-encrypt [--device PATH] --key-id ID --algorithm x25519-chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < plaintext.bin".into(),
+        "asym-decrypt" => "Usage: rphsmtool asym-decrypt [--device PATH] --key-id ID --algorithm x25519-chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < ciphertext.bin".into(),
         _ => {
             if show_all_help {
                 all_usage_text()
@@ -611,9 +627,11 @@ pub fn usage_text() -> String {
         "User Commands:",
         "  rphsmtool list-algorithms [--device PATH] [--baud 115200]",
         "  rphsmtool get-random [--device PATH] --bytes N --role administrator|key-manager --proof-env VAR [--baud 115200]",
-        "  rphsmtool generate-key [--device PATH] --algorithm ed25519|chacha20poly1305 --usage sign|encrypt,decrypt --role key-manager --proof-env VAR [--baud 115200]",
+        "  rphsmtool generate-key [--device PATH] --algorithm ed25519|p256|chacha20poly1305|aes256gcm|x25519-chacha20poly1305 --usage sign|encrypt,decrypt --role key-manager --proof-env VAR [--baud 115200]",
         "  rphsmtool sym-encrypt [--device PATH] --key-id ID --algorithm chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < plaintext.bin",
         "  rphsmtool sym-decrypt [--device PATH] --key-id ID --algorithm chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < ciphertext.bin",
+        "  rphsmtool asym-encrypt [--device PATH] --key-id ID --algorithm x25519-chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < plaintext.bin",
+        "  rphsmtool asym-decrypt [--device PATH] --key-id ID --algorithm x25519-chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < ciphertext.bin",
         "  rphsmtool sign [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin",
         "  rphsmtool verify [--device PATH] --algorithm ed25519|p256 --public-key-hex HEX --signature-hex HEX [--baud 115200] < message.bin",
         "  rphsmtool list-keys [--device PATH] --role key-manager --proof-env VAR [--baud 115200]",
@@ -698,7 +716,7 @@ pub fn all_usage_text() -> String {
         "  rphsmtool reactivate-recovered [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool recovery reactivate [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool get-random [--device PATH] --bytes N --role administrator|key-manager --proof-env VAR [--baud 115200]",
-        "  rphsmtool generate-key [--device PATH] --algorithm ed25519|chacha20poly1305 --usage sign|encrypt,decrypt --role key-manager --proof-env VAR [--baud 115200]",
+        "  rphsmtool generate-key [--device PATH] --algorithm ed25519|p256|chacha20poly1305|aes256gcm|x25519-chacha20poly1305 --usage sign|encrypt,decrypt --role key-manager --proof-env VAR [--baud 115200]",
         "  rphsmtool get-audit-page [--device PATH] [--start-sequence N] --max-events N [--one-line] --role administrator|recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool sign [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin",
         "  rphsmtool key sign [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin",
@@ -715,6 +733,8 @@ pub fn all_usage_text() -> String {
         "  rphsmtool key destroy [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200]",
         "  rphsmtool sym-encrypt [--device PATH] --key-id ID --algorithm chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < plaintext.bin",
         "  rphsmtool sym-decrypt [--device PATH] --key-id ID --algorithm chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < ciphertext.bin",
+        "  rphsmtool asym-encrypt [--device PATH] --key-id ID --algorithm x25519-chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < plaintext.bin",
+        "  rphsmtool asym-decrypt [--device PATH] --key-id ID --algorithm x25519-chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < ciphertext.bin",
     ]
     .join("\n")
 }
@@ -867,6 +887,31 @@ mod tests {
             parsed.command,
             CommandSpec::GenerateKey {
                 algorithm: ManagedAlgorithm::ChaCha20Poly1305,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_asymmetric_encrypt_command() {
+        let parsed = parse(&[
+            "rphsmtool",
+            "asym-encrypt",
+            "--key-id",
+            "7",
+            "--algorithm",
+            "x25519-chacha20poly1305",
+            "--role",
+            "key-manager",
+            "--proof-env",
+            "RPHSM_KEYMG",
+        ])
+        .expect("parse");
+        assert!(matches!(
+            parsed.command,
+            CommandSpec::AsymEncrypt {
+                key_id: 7,
+                algorithm: ManagedAlgorithm::X25519ChaCha20Poly1305,
                 ..
             }
         ));

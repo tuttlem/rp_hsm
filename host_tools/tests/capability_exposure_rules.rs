@@ -23,6 +23,21 @@ fn implemented_crypto_verbs_are_part_of_the_supported_surface() {
         ]),
         CommandSpec::SymEncrypt { .. }
     ));
+    assert!(matches!(
+        parse(&[
+            "rphsmtool",
+            "asym-encrypt",
+            "--key-id",
+            "1",
+            "--algorithm",
+            "x25519-chacha20poly1305",
+            "--role",
+            "key-manager",
+            "--proof-env",
+            "RPHSM_KEYMG",
+        ]),
+        CommandSpec::AsymEncrypt { .. }
+    ));
 }
 
 #[test]

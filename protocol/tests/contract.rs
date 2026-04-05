@@ -24,6 +24,8 @@ mod auth_redaction_vectors;
 mod crypto_command_vectors;
 #[path = "contract/crypto_redaction_vectors.rs"]
 mod crypto_redaction_vectors;
+#[path = "contract/asymmetric_encryption_vectors.rs"]
+mod asymmetric_encryption_vectors;
 #[path = "contract/policy_command_vectors.rs"]
 mod policy_command_vectors;
 #[path = "contract/policy_denial_vectors.rs"]

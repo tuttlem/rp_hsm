@@ -137,20 +137,21 @@ Planned operation progression after `005-core-crypto-operations`:
   - wrapped key import only
 - Post-`005` first-tier additions should focus on architecture-bearing services:
   - `AES-256-GCM`
-  - `HMAC-SHA-256`
-  - `SHA-256`
+  - `ChaCha20-Poly1305`
   - `HKDF-SHA-256`
   - `ECDSA P-256` signing
+  - `X25519` asymmetric recipient encryption
   - `ECDH P-256`
 - Post-`005` second-tier additions are acceptable only after policy, audit, and
   operator tooling are mature enough to support them safely:
+  - `HMAC-SHA-256`
+  - `SHA-256`
   - AES key wrap
   - AES-CMAC
   - `SHA-384`
   - `ECDSA P-384`
   - `Ed25519` public-key verification and compatibility extensions beyond the
     initial signing path
-  - `X25519`
 - Explicitly excluded from near-term scope unless a later spec justifies them:
   - plaintext key export
   - general-purpose decrypt/encrypt helpers without a clear custody use case

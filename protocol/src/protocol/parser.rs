@@ -2,16 +2,18 @@ use aes_gcm::{
     Aes256Gcm,
     aead::{AeadInPlace as AesAeadInPlace, generic_array::GenericArray as AesGenericArray},
 };
-use heapless::Vec;
 use chacha20poly1305::{
     ChaCha20Poly1305, KeyInit,
     aead::generic_array::GenericArray,
 };
 use ed25519_dalek::{Signer, Verifier};
+use hkdf::Hkdf;
+use heapless::Vec;
 use p256::ecdsa::{
     Signature as P256Signature, SigningKey as P256SigningKey, VerifyingKey as P256VerifyingKey,
 };
 use sha2::{Digest, Sha256};
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
 
 use super::codec::{
     DecodeError, StatusCode, clear_bytes, decode_audit_page_request,
@@ -50,7 +52,8 @@ use super::state::{
     FirmwareUpdateBeginResult, FirmwareVersion, KeyAlgorithm, KeyLifecycleState,
     PersistentKeyStore, PolicyProfile, ProtectedActionClass, ProvisioningRecord,
     ProvisioningSnapshot, RecoveryState, SessionLifecycleState, SessionRecord, SessionState,
-    SessionTracker, TrustedBootState, UPDATE_MANIFEST_VERSION,
+    SessionTracker, TrustedBootState, UPDATE_MANIFEST_VERSION, X25519_ENVELOPE_HEADER_LEN,
+    X25519_PUBLIC_KEY_LEN,
     UPDATE_SIGNATURE_ALGORITHM_ED25519, UpdateRecoveryReason, UpdateResultClass,
     UpdateTransferPhase, UpdateTransferState, USAGE_DECRYPT, USAGE_ENCRYPT, USAGE_SIGN,
     USAGE_WRAP_IMPORT,
@@ -98,6 +101,7 @@ pub enum FirmwareAction {
 }
 
 const UPDATE_TRUST_ANCHOR_SEED: &[u8; 32] = b"rp_hsm_update_anchor_seed_v1____";
+const ASYMMETRIC_ENCRYPT_INFO: &[u8] = b"rp_hsm.asym_encrypt.v1";
 
 pub struct ProtocolEngine {
     record: ProvisioningRecord,
@@ -1980,6 +1984,7 @@ impl ProtocolEngine {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_generate_key(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
         let (_, inner) = match self.authorize_privileged_owned::<2>(
             AuthorityRole::KeyManager,
@@ -2047,6 +2052,22 @@ impl ProtocolEngine {
                 let bytes = match self
                     .crypto_state
                     .generate_random_bytes(super::state::AES256GCM_KEY_LEN)
+                {
+                    Ok(bytes) => bytes,
+                    Err(StatusCode::StateError) => {
+                        return status_response(StatusCode::InternalError, &[]);
+                    }
+                    Err(status) => return status_response(status, &[]),
+                };
+                (USAGE_ENCRYPT | USAGE_DECRYPT, bytes)
+            }
+            KeyAlgorithm::X25519ChaCha20Poly1305 => {
+                if request.usage_mask != (USAGE_ENCRYPT | USAGE_DECRYPT) {
+                    return status_response(StatusCode::AuthorizationError, &[]);
+                }
+                let bytes = match self
+                    .crypto_state
+                    .generate_random_bytes(super::state::MAX_KEY_MATERIAL_LEN)
                 {
                     Ok(bytes) => bytes,
                     Err(StatusCode::StateError) => {
@@ -2148,7 +2169,9 @@ impl ProtocolEngine {
                     None => status_response(StatusCode::InternalError, &[]),
                 }
             }
-            KeyAlgorithm::ChaCha20Poly1305 | KeyAlgorithm::Aes256Gcm => {
+            KeyAlgorithm::ChaCha20Poly1305
+            | KeyAlgorithm::Aes256Gcm
+            | KeyAlgorithm::X25519ChaCha20Poly1305 => {
                 status_response(StatusCode::AuthorizationError, &[])
             }
         };
@@ -2215,26 +2238,27 @@ impl ProtocolEngine {
                 return status_response(status, &[]);
             }
         };
-        let nonce_bytes = match self
-            .crypto_state
-            .generate_random_bytes(super::state::CHACHA20POLY1305_NONCE_LEN)
-        {
-            Ok(bytes) => bytes,
-            Err(StatusCode::StateError) => {
-                clear_secret_array(&mut key_bytes);
-                clear_bytes(inner.as_mut_slice());
-                return status_response(StatusCode::InternalError, &[]);
-            }
-            Err(status) => {
-                clear_secret_array(&mut key_bytes);
-                clear_bytes(inner.as_mut_slice());
-                return status_response(status, &[]);
-            }
-        };
         let mut ciphertext = request.plaintext.clone();
         let mut tag_bytes = Vec::<u8, { super::state::AES256GCM_TAG_LEN }>::new();
+        let mut response_nonce = Vec::<u8, { super::state::MAX_ENCRYPT_HEADER_LEN }>::new();
         match request.algorithm {
             KeyAlgorithm::ChaCha20Poly1305 => {
+                let nonce_bytes = match self
+                    .crypto_state
+                    .generate_random_bytes(super::state::CHACHA20POLY1305_NONCE_LEN)
+                {
+                    Ok(bytes) => bytes,
+                    Err(StatusCode::StateError) => {
+                        clear_secret_array(&mut key_bytes);
+                        clear_bytes(inner.as_mut_slice());
+                        return status_response(StatusCode::InternalError, &[]);
+                    }
+                    Err(status) => {
+                        clear_secret_array(&mut key_bytes);
+                        clear_bytes(inner.as_mut_slice());
+                        return status_response(status, &[]);
+                    }
+                };
                 let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&key_bytes));
                 let nonce = GenericArray::from_slice(nonce_bytes.as_slice());
                 let Ok(tag) = cipher.encrypt_in_place_detached(nonce, b"", ciphertext.as_mut_slice()) else {
@@ -2247,8 +2271,29 @@ impl ProtocolEngine {
                     clear_bytes(inner.as_mut_slice());
                     return status_response(StatusCode::InternalError, &[]);
                 }
+                if response_nonce.extend_from_slice(nonce_bytes.as_slice()).is_err() {
+                    clear_secret_array(&mut key_bytes);
+                    clear_bytes(inner.as_mut_slice());
+                    return status_response(StatusCode::InternalError, &[]);
+                }
             }
             KeyAlgorithm::Aes256Gcm => {
+                let nonce_bytes = match self
+                    .crypto_state
+                    .generate_random_bytes(super::state::AES256GCM_NONCE_LEN)
+                {
+                    Ok(bytes) => bytes,
+                    Err(StatusCode::StateError) => {
+                        clear_secret_array(&mut key_bytes);
+                        clear_bytes(inner.as_mut_slice());
+                        return status_response(StatusCode::InternalError, &[]);
+                    }
+                    Err(status) => {
+                        clear_secret_array(&mut key_bytes);
+                        clear_bytes(inner.as_mut_slice());
+                        return status_response(status, &[]);
+                    }
+                };
                 let cipher = Aes256Gcm::new(AesGenericArray::from_slice(&key_bytes));
                 let nonce = AesGenericArray::from_slice(nonce_bytes.as_slice());
                 let Ok(tag) = cipher.encrypt_in_place_detached(nonce, b"", ciphertext.as_mut_slice()) else {
@@ -2261,6 +2306,86 @@ impl ProtocolEngine {
                     clear_bytes(inner.as_mut_slice());
                     return status_response(StatusCode::InternalError, &[]);
                 }
+                if response_nonce.extend_from_slice(nonce_bytes.as_slice()).is_err() {
+                    clear_secret_array(&mut key_bytes);
+                    clear_bytes(inner.as_mut_slice());
+                    return status_response(StatusCode::InternalError, &[]);
+                }
+            }
+            KeyAlgorithm::X25519ChaCha20Poly1305 => {
+                let mut recipient_secret_bytes = [0u8; super::state::MAX_KEY_MATERIAL_LEN];
+                recipient_secret_bytes.copy_from_slice(&key_bytes);
+                let recipient_secret = X25519StaticSecret::from(recipient_secret_bytes);
+                let recipient_public = X25519PublicKey::from(&recipient_secret);
+                let ephemeral_seed = match self
+                    .crypto_state
+                    .generate_random_bytes(super::state::MAX_KEY_MATERIAL_LEN)
+                {
+                    Ok(bytes) => bytes,
+                    Err(StatusCode::StateError) => {
+                        clear_secret_array(&mut recipient_secret_bytes);
+                        clear_bytes(inner.as_mut_slice());
+                        return status_response(StatusCode::InternalError, &[]);
+                    }
+                    Err(status) => {
+                        clear_secret_array(&mut recipient_secret_bytes);
+                        clear_bytes(inner.as_mut_slice());
+                        return status_response(status, &[]);
+                    }
+                };
+                let nonce_bytes = match self
+                    .crypto_state
+                    .generate_random_bytes(super::state::CHACHA20POLY1305_NONCE_LEN)
+                {
+                    Ok(bytes) => bytes,
+                    Err(StatusCode::StateError) => {
+                        clear_bytes(inner.as_mut_slice());
+                        return status_response(StatusCode::InternalError, &[]);
+                    }
+                    Err(status) => {
+                        clear_bytes(inner.as_mut_slice());
+                        return status_response(status, &[]);
+                    }
+                };
+                let mut ephemeral_secret_bytes = [0u8; super::state::MAX_KEY_MATERIAL_LEN];
+                ephemeral_secret_bytes.copy_from_slice(ephemeral_seed.as_slice());
+                let ephemeral_secret = X25519StaticSecret::from(ephemeral_secret_bytes);
+                let ephemeral_public = X25519PublicKey::from(&ephemeral_secret);
+                let shared_secret = ephemeral_secret.diffie_hellman(&recipient_public);
+                let hk = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
+                let mut derived_key = [0u8; super::state::CHACHA20POLY1305_KEY_LEN];
+                if hk
+                    .expand(ASYMMETRIC_ENCRYPT_INFO, &mut derived_key)
+                    .is_err()
+                {
+                    clear_secret_array(&mut recipient_secret_bytes);
+                    clear_secret_array(&mut ephemeral_secret_bytes);
+                    clear_secret_array(&mut derived_key);
+                    clear_bytes(inner.as_mut_slice());
+                    return status_response(StatusCode::InternalError, &[]);
+                }
+                let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&derived_key));
+                let nonce = GenericArray::from_slice(nonce_bytes.as_slice());
+                let Ok(tag) = cipher.encrypt_in_place_detached(nonce, b"", ciphertext.as_mut_slice()) else {
+                    clear_secret_array(&mut recipient_secret_bytes);
+                    clear_secret_array(&mut ephemeral_secret_bytes);
+                    clear_secret_array(&mut derived_key);
+                    clear_bytes(inner.as_mut_slice());
+                    return status_response(StatusCode::InternalError, &[]);
+                };
+                if response_nonce.extend_from_slice(ephemeral_public.as_bytes()).is_err()
+                    || response_nonce.extend_from_slice(nonce_bytes.as_slice()).is_err()
+                    || tag_bytes.extend_from_slice(tag.as_slice()).is_err()
+                {
+                    clear_secret_array(&mut recipient_secret_bytes);
+                    clear_secret_array(&mut ephemeral_secret_bytes);
+                    clear_secret_array(&mut derived_key);
+                    clear_bytes(inner.as_mut_slice());
+                    return status_response(StatusCode::InternalError, &[]);
+                }
+                clear_secret_array(&mut recipient_secret_bytes);
+                clear_secret_array(&mut ephemeral_secret_bytes);
+                clear_secret_array(&mut derived_key);
             }
             KeyAlgorithm::Ed25519 | KeyAlgorithm::P256 => {
                 clear_secret_array(&mut key_bytes);
@@ -2269,12 +2394,6 @@ impl ProtocolEngine {
             }
         }
         if ciphertext.extend_from_slice(tag_bytes.as_slice()).is_err() {
-            clear_secret_array(&mut key_bytes);
-            clear_bytes(inner.as_mut_slice());
-            return status_response(StatusCode::InternalError, &[]);
-        }
-        let mut nonce = Vec::<u8, { super::state::CHACHA20POLY1305_NONCE_LEN }>::new();
-        if nonce.extend_from_slice(nonce_bytes.as_slice()).is_err() {
             clear_secret_array(&mut key_bytes);
             clear_bytes(inner.as_mut_slice());
             return status_response(StatusCode::InternalError, &[]);
@@ -2289,7 +2408,7 @@ impl ProtocolEngine {
             return status_response(StatusCode::InternalError, &[]);
         }
         let response_payload = encode_encrypt_response_payload(&EncryptResponse {
-            nonce,
+            nonce: response_nonce,
             ciphertext: encoded_ciphertext,
         });
         self.record_audit_event(
@@ -2308,11 +2427,11 @@ impl ProtocolEngine {
 
     #[allow(clippy::too_many_lines)]
     fn handle_decrypt(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
-        let (_, mut inner) = match self.authorize_privileged_owned::<167>(
+        let (_, mut inner) = match self.authorize_privileged_owned::<199>(
             AuthorityRole::KeyManager,
             frame.payload.as_slice(),
             18,
-            167,
+            199,
         ) {
             Ok(values) => values,
             Err(status) => return status_response(status, &[]),
@@ -2390,6 +2509,46 @@ impl ProtocolEngine {
                 let tag = aes_gcm::Tag::from_slice(&request.ciphertext.as_slice()[split_at..]);
                 cipher.decrypt_in_place_detached(nonce, b"", plaintext.as_mut_slice(), tag)
             }
+            KeyAlgorithm::X25519ChaCha20Poly1305 => {
+                if request.nonce.len() != X25519_ENVELOPE_HEADER_LEN {
+                    clear_secret_array(&mut key_bytes);
+                    clear_bytes(inner.as_mut_slice());
+                    return status_response(StatusCode::ValidationError, &[]);
+                }
+                let mut recipient_secret_bytes = [0u8; super::state::MAX_KEY_MATERIAL_LEN];
+                recipient_secret_bytes.copy_from_slice(&key_bytes);
+                let recipient_secret = X25519StaticSecret::from(recipient_secret_bytes);
+                let mut ephemeral_public_bytes = [0u8; X25519_PUBLIC_KEY_LEN];
+                ephemeral_public_bytes.copy_from_slice(&request.nonce.as_slice()[..X25519_PUBLIC_KEY_LEN]);
+                let ephemeral_public = X25519PublicKey::from(ephemeral_public_bytes);
+                let shared_secret = recipient_secret.diffie_hellman(&ephemeral_public);
+                let hk = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
+                let mut derived_key = [0u8; super::state::CHACHA20POLY1305_KEY_LEN];
+                if hk
+                    .expand(ASYMMETRIC_ENCRYPT_INFO, &mut derived_key)
+                    .is_err()
+                {
+                    clear_secret_array(&mut recipient_secret_bytes);
+                    clear_secret_array(&mut derived_key);
+                    clear_bytes(inner.as_mut_slice());
+                    return status_response(StatusCode::InternalError, &[]);
+                }
+                let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&derived_key));
+                let nonce = GenericArray::from_slice(
+                    &request.nonce.as_slice()[X25519_PUBLIC_KEY_LEN..X25519_ENVELOPE_HEADER_LEN],
+                );
+                let tag =
+                    chacha20poly1305::Tag::from_slice(&request.ciphertext.as_slice()[split_at..]);
+                let result = cipher.decrypt_in_place_detached(
+                    nonce,
+                    b"",
+                    plaintext.as_mut_slice(),
+                    tag,
+                );
+                clear_secret_array(&mut recipient_secret_bytes);
+                clear_secret_array(&mut derived_key);
+                result
+            }
             KeyAlgorithm::Ed25519 | KeyAlgorithm::P256 => {
                 clear_secret_array(&mut key_bytes);
                 clear_bytes(inner.as_mut_slice());
@@ -2449,7 +2608,9 @@ impl ProtocolEngine {
                 };
                 verifying_key.verify(request.message.as_slice(), &signature).is_ok()
             }
-            KeyAlgorithm::ChaCha20Poly1305 | KeyAlgorithm::Aes256Gcm => {
+            KeyAlgorithm::ChaCha20Poly1305
+            | KeyAlgorithm::Aes256Gcm
+            | KeyAlgorithm::X25519ChaCha20Poly1305 => {
                 return status_response(StatusCode::AuthorizationError, &[])
             }
         };
