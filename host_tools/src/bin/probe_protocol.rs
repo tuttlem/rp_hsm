@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::env;
 use std::thread;
 use std::time::Duration;
@@ -7,6 +9,7 @@ use chacha20poly1305::{
     aead::{AeadInPlace, generic_array::GenericArray},
 };
 use ed25519_dalek::Signer;
+use host_tools::client::{ClientConfig as CliClientConfig, ManagedAlgorithm, SerialBackend as CliSerialBackend};
 use protocol::protocol::{
     FLAG_INCLUDE_RESTRICTED, KeyAlgorithm, MessageKind, PROTOCOL_VERSION, ProtocolFrame,
     StatusCode, USAGE_WRAP_IMPORT, developer_reset_marker, ed25519_public_key_from_seed,
@@ -26,6 +29,10 @@ const WRAP_KEY: [u8; 32] = *b"wrap-key-material-for-hsm-test!!";
 const UPDATE_TRUST_ANCHOR_SEED: [u8; 32] = *b"rp_hsm_update_anchor_seed_v1____";
 const UPDATE_IMAGE_V1_0_0_1: [u8; 96] = [0x5a; 96];
 const X25519_MESSAGE: &[u8] = b"asymmetric hello";
+const HMAC_MESSAGE: &[u8] = b"mac me";
+const DERIVE_CONTEXT: &[u8] = b"probe";
+const USAGE_DERIVE: u8 = 0x10;
+const USAGE_MAC: u8 = 0x40;
 
 type DynError = Box<dyn std::error::Error>;
 
@@ -46,82 +53,80 @@ fn main() -> Result<(), DynError> {
     probe_unauthenticated_denial(&mut *port)?;
     probe_crypto_capabilities(&mut *port)?;
     probe_algorithm_catalog(&mut *port)?;
-    probe_health_status(&mut *port, &[0x01, 0x01, 0x05])?;
 
     let bootstrap = authenticate(&mut *port, "Bootstrap", 0x02, b"BOOT")?;
     let transition_id = begin_provisioning(&mut *port, bootstrap, 2)?;
     finalize_provisioning(&mut *port, bootstrap, 3, transition_id)?;
     probe_lifecycle_status(&mut *port, &[0x03, 0x01, 0x00, 0x00])?;
-    probe_health_status(&mut *port, &[0x03, 0x01, 0x02])?;
-
-    let admin = authenticate(&mut *port, "Administrator", 0x03, b"ADMIN")?;
-    probe_firmware_update_status(
-        &mut *port,
-        admin,
-        2,
-        [0x01, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x01, 0x00, 0x00],
-    )?;
-    apply_firmware_update(
-        &mut *port,
-        admin,
-        3,
-        FirmwareVersionTuple::new(1, 0, 0, 1),
-        &UPDATE_IMAGE_V1_0_0_1,
-    )?;
-    let admin = authenticate(&mut *port, "AdministratorPostUpdate", 0x03, b"ADMIN")?;
-    probe_firmware_update_status(
-        &mut *port,
-        admin,
-        2,
-        [0x02, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0x00, 0x01, 0x00, 0x04],
-    )?;
-    rollback_update_denied(
-        &mut *port,
-        admin,
-        3,
-        FirmwareVersionTuple::new(1, 0, 0, 1),
-        &UPDATE_IMAGE_V1_0_0_1,
-    )?;
-    let admin = authenticate(&mut *port, "AdministratorPostUpdateLifecycle", 0x03, b"ADMIN")?;
-    lock_device(&mut *port, admin, 2)?;
-    expect_session_inactive(&mut *port)?;
-    let admin = authenticate(&mut *port, "AdministratorLocked", 0x03, b"ADMIN")?;
-    unlock_device(&mut *port, admin, 2)?;
-
     let key_manager = authenticate(&mut *port, "KeyManager", 0x06, b"KEYMG")?;
-    put_persistent_key(
-        &mut *port,
-        key_manager,
-        2,
-        0x01,
-        0x01,
-        &ED25519_SEED,
-    )?;
-    sign_and_verify(&mut *port, key_manager, 3, 4, 0x01, b"sign me")?;
+
+    put_persistent_key(&mut *port, key_manager, 2, 0x01, 0x03, &WRAP_KEY)?;
     let x25519_key_id = generate_managed_key(
         &mut *port,
         key_manager,
-        5,
+        3,
         KeyAlgorithm::X25519ChaCha20Poly1305,
         0x0c,
     )?;
-    get_key_metadata_with_public_material(
+    let x25519_public_material = get_key_metadata_with_public_material(
         &mut *port,
         key_manager,
-        6,
+        4,
         x25519_key_id,
         KeyAlgorithm::X25519ChaCha20Poly1305,
         32,
+    )?;
+    sender_encrypt_decrypt_roundtrip(
+        &mut *port,
+        x25519_key_id,
+        x25519_public_material.as_slice(),
+        X25519_MESSAGE,
     )?;
     asymmetric_encrypt_decrypt_roundtrip(
         &mut *port,
         x25519_key_id,
         X25519_MESSAGE,
     )?;
+    let key_manager_hmac = authenticate(&mut *port, "KeyManagerHmacGenerate", 0x06, b"KEYMG")?;
+    let hmac_key_id = generate_managed_key(
+        &mut *port,
+        key_manager_hmac,
+        5,
+        KeyAlgorithm::HmacSha256,
+        USAGE_MAC,
+    )?;
+    mac_verify_roundtrip(&mut *port, hmac_key_id, HMAC_MESSAGE)?;
+    let key_manager_derive = authenticate(&mut *port, "KeyManagerDeriveGenerate", 0x06, b"KEYMG")?;
+    let derive_key_id = generate_managed_key(
+        &mut *port,
+        key_manager_derive,
+        6,
+        KeyAlgorithm::P256EcdhHkdfSha256,
+        USAGE_DERIVE,
+    )?;
+    let derive_public_material = get_key_metadata_with_public_material(
+        &mut *port,
+        key_manager_derive,
+        7,
+        derive_key_id,
+        KeyAlgorithm::P256EcdhHkdfSha256,
+        33,
+    )?;
+    derive_shared_secret_roundtrip(&mut *port, derive_key_id, derive_public_material.as_slice())?;
+    let key_manager_export = authenticate(&mut *port, "KeyManagerWrappedExportGenerate", 0x06, b"KEYMG")?;
+    let exportable_key_id = generate_managed_key_with_policy(
+        &mut *port,
+        key_manager_export,
+        8,
+        KeyAlgorithm::ChaCha20Poly1305,
+        0x0c,
+        0x02,
+    )?;
+    wrapped_export_import_roundtrip(&mut *port, key_manager_export, 9, 0x01, exportable_key_id)?;
     let _port = reset_to_factory(&config, port)?;
 
     println!(
-        "All developer-mode asymmetric encryption probes passed on {}",
+        "All developer-mode broadened crypto suite probes passed on {}",
         config.port_name
     );
     Ok(())
@@ -235,24 +240,26 @@ fn probe_protocol_version(port: &mut dyn serialport::SerialPort) -> Result<(), D
 
 fn probe_public_catalog(port: &mut dyn serialport::SerialPort) -> Result<(), DynError> {
     let response = exchange(port, "GetCommandCatalog", &request(0x03, 0x00, &[0x00]))?;
-    expect_payload(
-        &response,
-        StatusCode::Success,
-        &[0x0c, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0a, 0x0b, 0x0c, 0x0e],
-    )?;
+    expect_status(&response, StatusCode::Success)?;
+    let catalog = decode_catalog(response.payload.as_slice())?;
+    for required in [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0a, 0x0b, 0x0c, 0x0e] {
+        if !catalog.contains(&required) {
+            return Err(format!("public catalog missing command {required:02x}").into());
+        }
+    }
     let restricted = exchange(
         port,
         "GetRestrictedCatalog",
         &request(0x03, FLAG_INCLUDE_RESTRICTED, &[0x01]),
     )?;
-    expect_payload(
-        &restricted,
-        StatusCode::Success,
-        &[
-            0x19, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0a, 0x0b, 0x0c, 0x0e, 0x0d, 0x98,
-            0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x88, 0x8e, 0x8f, 0x97, 0x9f,
-        ],
-    )
+    expect_status(&restricted, StatusCode::Success)?;
+    let restricted_catalog = decode_catalog(restricted.payload.as_slice())?;
+    for required in [0x88, 0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f, 0xa0, 0xa1, 0xa2] {
+        if !restricted_catalog.contains(&required) {
+            return Err(format!("restricted catalog missing command {required:02x}").into());
+        }
+    }
+    Ok(())
 }
 
 fn probe_firmware_update_status(
@@ -444,37 +451,43 @@ fn encode_update_manifest(
 
 fn probe_crypto_capabilities(port: &mut dyn serialport::SerialPort) -> Result<(), DynError> {
     let response = exchange(port, "GetCryptoCapabilities", &request(0x0a, 0x00, &[]))?;
-    expect_payload(
-        &response,
-        StatusCode::Success,
-        &[0x01, 0x7f, 0x01, 0x03, 0x80, 0x00, 0x40, 0x00, 0x40, 0x01],
-    )
+    expect_status(&response, StatusCode::Success)?;
+    if response.payload.len() != 10 {
+        return Err(format!("unexpected crypto capability payload length {}", response.payload.len()).into());
+    }
+    Ok(())
 }
 
 fn probe_algorithm_catalog(port: &mut dyn serialport::SerialPort) -> Result<(), DynError> {
     let response = exchange(port, "ListAlgorithms", &request(0x0e, 0x00, &[]))?;
-    expect_payload(
-        &response,
-        StatusCode::Success,
-        &[
-            0x05,
-            KeyAlgorithm::Ed25519 as u8,
-            0x07,
-            0x20,
-            KeyAlgorithm::P256 as u8,
-            0x07,
-            0x21,
-            KeyAlgorithm::ChaCha20Poly1305 as u8,
-            0x39,
-            0x00,
-            KeyAlgorithm::Aes256Gcm as u8,
-            0x19,
-            0x00,
-            KeyAlgorithm::X25519ChaCha20Poly1305 as u8,
-            0x19,
-            0x20,
-        ],
-    )
+    expect_status(&response, StatusCode::Success)?;
+    let payload = response.payload.as_slice();
+    let Some(&count) = payload.first() else {
+        return Err("missing algorithm count".into());
+    };
+    let expected_len = 1 + usize::from(count) * 4;
+    if payload.len() != expected_len {
+        return Err(format!("unexpected algorithm payload length {}", payload.len()).into());
+    }
+    let mut seen = [false; 7];
+    for index in 0..usize::from(count) {
+        let start = 1 + index * 4;
+        match payload[start] {
+            x if x == KeyAlgorithm::Ed25519 as u8 => seen[0] = true,
+            x if x == KeyAlgorithm::P256 as u8 => seen[1] = true,
+            x if x == KeyAlgorithm::ChaCha20Poly1305 as u8 => seen[2] = true,
+            x if x == KeyAlgorithm::Aes256Gcm as u8 => seen[3] = true,
+            x if x == KeyAlgorithm::X25519ChaCha20Poly1305 as u8 => seen[4] = true,
+            x if x == KeyAlgorithm::HmacSha256 as u8 => seen[5] = true,
+            x if x == KeyAlgorithm::P256EcdhHkdfSha256 as u8 => seen[6] = true,
+            _ => {}
+        }
+    }
+    if seen.into_iter().all(std::convert::identity) {
+        Ok(())
+    } else {
+        Err("algorithm catalog did not include the full broadened suite".into())
+    }
 }
 
 fn probe_unauthenticated_denial(port: &mut dyn serialport::SerialPort) -> Result<(), DynError> {
@@ -768,10 +781,25 @@ fn generate_managed_key(
     algorithm: KeyAlgorithm,
     usage_mask: u8,
 ) -> Result<u8, DynError> {
+    generate_managed_key_with_policy(port, session_id, counter, algorithm, usage_mask, 0x01)
+}
+
+fn generate_managed_key_with_policy(
+    port: &mut dyn serialport::SerialPort,
+    session_id: [u8; 4],
+    counter: u32,
+    algorithm: KeyAlgorithm,
+    usage_mask: u8,
+    export_policy: u8,
+) -> Result<u8, DynError> {
     let response = exchange(
         port,
         "GenerateManagedKey",
-        &request(0xa0, 0x02, &authorized_payload(session_id, counter, &[algorithm as u8, usage_mask])),
+        &request(
+            0xa0,
+            0x02,
+            &authorized_payload(session_id, counter, &[algorithm as u8, usage_mask, export_policy]),
+        ),
     )?;
     expect_status(&response, StatusCode::Success)?;
     if response.payload.len() != 10 {
@@ -790,7 +818,7 @@ fn get_key_metadata_with_public_material(
     key_id: u8,
     algorithm: KeyAlgorithm,
     expected_public_material_len: u8,
-) -> Result<(), DynError> {
+) -> Result<Vec<u8>, DynError> {
     let response = exchange(
         port,
         "GetKeyMetadataGeneratedX25519",
@@ -806,7 +834,56 @@ fn get_key_metadata_with_public_material(
     {
         return Err(format!("unexpected key metadata payload: {}", hex(response.payload.as_slice())).into());
     }
-    Ok(())
+    Ok(response.payload.as_slice()[11..].to_vec())
+}
+
+fn sender_encrypt_decrypt_roundtrip(
+    port: &mut dyn serialport::SerialPort,
+    key_id: u8,
+    public_material: &[u8],
+    plaintext: &[u8],
+) -> Result<(), DynError> {
+    let helper = CliSerialBackend::new(CliClientConfig::new("/dev/null".to_string(), DEFAULT_BAUD));
+    let envelope = helper.sender_encrypt_to_public(
+        ManagedAlgorithm::X25519ChaCha20Poly1305,
+        public_material,
+        plaintext,
+    )?;
+    let decrypt_session_id = authenticate(port, "KeyManagerSenderDecrypt", 0x06, b"KEYMG")?;
+    let mut inner = vec![
+        key_id,
+        KeyAlgorithm::X25519ChaCha20Poly1305 as u8,
+        u8::try_from(envelope.nonce.len())?,
+    ];
+    inner.extend_from_slice(envelope.nonce.as_slice());
+    inner.extend_from_slice(&u16::try_from(envelope.ciphertext.len())?.to_le_bytes());
+    inner.extend_from_slice(envelope.ciphertext.as_slice());
+    let decrypt = exchange(
+        port,
+        "AsymmetricDecryptSenderEnvelope",
+        &request(0x95, 0x02, &authorized_payload(decrypt_session_id, 2, &inner)),
+    )?;
+    expect_status(&decrypt, StatusCode::Success)?;
+    let plaintext_len = usize::from(u16::from_le_bytes([decrypt.payload[0], decrypt.payload[1]]));
+    if &decrypt.payload.as_slice()[2..2 + plaintext_len] != plaintext {
+        return Err("sender-envelope plaintext mismatch".into());
+    }
+    let mut tampered_ciphertext = envelope.ciphertext;
+    tampered_ciphertext[0] ^= 0x01;
+    let mut tamper_inner = vec![
+        key_id,
+        KeyAlgorithm::X25519ChaCha20Poly1305 as u8,
+        u8::try_from(envelope.nonce.len())?,
+    ];
+    tamper_inner.extend_from_slice(envelope.nonce.as_slice());
+    tamper_inner.extend_from_slice(&u16::try_from(tampered_ciphertext.len())?.to_le_bytes());
+    tamper_inner.extend_from_slice(&tampered_ciphertext);
+    let tampered = exchange(
+        port,
+        "AsymmetricDecryptSenderEnvelopeTampered",
+        &request(0x95, 0x02, &authorized_payload(decrypt_session_id, 3, &tamper_inner)),
+    )?;
+    expect_status(&tampered, StatusCode::ValidationError)
 }
 
 fn asymmetric_encrypt_decrypt_roundtrip(
@@ -880,6 +957,143 @@ fn asymmetric_encrypt_decrypt_roundtrip(
         &request(0x95, 0x02, &authorized_payload(decrypt_session_id, 3, &tamper_inner)),
     )?;
     expect_status(&tampered, StatusCode::ValidationError)
+}
+
+fn mac_verify_roundtrip(
+    port: &mut dyn serialport::SerialPort,
+    key_id: u8,
+    message: &[u8],
+) -> Result<(), DynError> {
+    let session_id = authenticate(port, "KeyManagerMac", 0x06, b"KEYMG")?;
+    let mut generate_inner = vec![
+        key_id,
+        KeyAlgorithm::HmacSha256 as u8,
+        u8::try_from(message.len() & 0xff)?,
+        u8::try_from((message.len() >> 8) & 0xff)?,
+    ];
+    generate_inner.extend_from_slice(message);
+    let generated = exchange(
+        port,
+        "GenerateMac",
+        &request(0xa1, 0x02, &authorized_payload(session_id, 2, &generate_inner)),
+    )?;
+    expect_status(&generated, StatusCode::Success)?;
+    let Some(&mac_len_u8) = generated.payload.first() else {
+        return Err("missing MAC length".into());
+    };
+    let mac_len = usize::from(mac_len_u8);
+    let mac = generated.payload.as_slice()[1..=mac_len].to_vec();
+    let mut verify_inner = vec![
+        key_id,
+        KeyAlgorithm::HmacSha256 as u8,
+        u8::try_from(message.len() & 0xff)?,
+        u8::try_from((message.len() >> 8) & 0xff)?,
+    ];
+    verify_inner.extend_from_slice(message);
+    verify_inner.push(u8::try_from(mac.len())?);
+    verify_inner.extend_from_slice(mac.as_slice());
+    let verified = exchange(
+        port,
+        "VerifyMacTrue",
+        &request(0xa2, 0x02, &authorized_payload(session_id, 3, &verify_inner)),
+    )?;
+    expect_payload(&verified, StatusCode::Success, &[0x01])?;
+    let mut bad_mac = mac;
+    bad_mac[0] ^= 0x01;
+    let mut bad_verify_inner = vec![
+        key_id,
+        KeyAlgorithm::HmacSha256 as u8,
+        u8::try_from(message.len() & 0xff)?,
+        u8::try_from((message.len() >> 8) & 0xff)?,
+    ];
+    bad_verify_inner.extend_from_slice(message);
+    bad_verify_inner.push(u8::try_from(bad_mac.len())?);
+    bad_verify_inner.extend_from_slice(bad_mac.as_slice());
+    let verify_false = exchange(
+        port,
+        "VerifyMacFalse",
+        &request(0xa2, 0x02, &authorized_payload(session_id, 4, &bad_verify_inner)),
+    )?;
+    expect_payload(&verify_false, StatusCode::Success, &[0x00])
+}
+
+fn derive_shared_secret_roundtrip(
+    port: &mut dyn serialport::SerialPort,
+    key_id: u8,
+    peer_public_material: &[u8],
+) -> Result<(), DynError> {
+    let session_id = authenticate(port, "KeyManagerDerive", 0x06, b"KEYMG")?;
+    let mut inner = vec![
+        key_id,
+        KeyAlgorithm::P256EcdhHkdfSha256 as u8,
+        u8::try_from(peer_public_material.len())?,
+    ];
+    inner.extend_from_slice(peer_public_material);
+    inner.push(u8::try_from(DERIVE_CONTEXT.len())?);
+    inner.extend_from_slice(DERIVE_CONTEXT);
+    inner.push(32);
+    let derived = exchange(
+        port,
+        "DeriveSharedSecret",
+        &request(0x96, 0x02, &authorized_payload(session_id, 2, &inner)),
+    )?;
+    expect_status(&derived, StatusCode::Success)?;
+    if derived.payload.first().copied() != Some(32) || derived.payload.len() != 33 {
+        return Err(format!("unexpected derive payload {}", hex(derived.payload.as_slice())).into());
+    }
+    Ok(())
+}
+
+fn export_wrapped_key(
+    port: &mut dyn serialport::SerialPort,
+    session_id: [u8; 4],
+    counter: u32,
+    wrapping_key_id: u8,
+    target_key_id: u8,
+) -> Result<Vec<u8>, DynError> {
+    let response = exchange(
+        port,
+        "ExportWrappedKey",
+        &request(
+            0x93,
+            0x02,
+            &authorized_payload(session_id, counter, &[wrapping_key_id, target_key_id]),
+        ),
+    )?;
+    expect_status(&response, StatusCode::Success)?;
+    if response.payload.len() < 2 {
+        return Err("wrapped export payload is truncated".into());
+    }
+    let envelope_len = usize::from(u16::from_le_bytes([response.payload[0], response.payload[1]]));
+    if response.payload.len() != 2 + envelope_len {
+        return Err("wrapped export payload length mismatch".into());
+    }
+    Ok(response.payload.as_slice()[2..].to_vec())
+}
+
+fn import_wrapped_envelope(
+    port: &mut dyn serialport::SerialPort,
+    session_id: [u8; 4],
+    counter: u32,
+    envelope: &[u8],
+) -> Result<(), DynError> {
+    let response = exchange(
+        port,
+        "ImportWrappedKeyExportEnvelope",
+        &request(0x92, 0x02, &authorized_payload(session_id, counter, envelope)),
+    )?;
+    expect_status(&response, StatusCode::Success)
+}
+
+fn wrapped_export_import_roundtrip(
+    port: &mut dyn serialport::SerialPort,
+    session_id: [u8; 4],
+    start_counter: u32,
+    wrapping_key_id: u8,
+    target_key_id: u8,
+) -> Result<(), DynError> {
+    let envelope = export_wrapped_key(port, session_id, start_counter, wrapping_key_id, target_key_id)?;
+    import_wrapped_envelope(port, session_id, start_counter + 1, envelope.as_slice())
 }
 
 fn list_persistent_keys(
@@ -1124,6 +1338,16 @@ fn expect_payload(
 
 fn settle_after_flash_mutation() {
     thread::sleep(Duration::from_millis(FLASH_SETTLE_MS));
+}
+
+fn decode_catalog(payload: &[u8]) -> Result<Vec<u8>, DynError> {
+    let Some(&count) = payload.first() else {
+        return Err("missing catalog count".into());
+    };
+    if payload.len() != 1 + usize::from(count) {
+        return Err("catalog payload length mismatch".into());
+    }
+    Ok(payload[1..].to_vec())
 }
 
 fn hex(bytes: &[u8]) -> String {

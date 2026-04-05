@@ -21,6 +21,7 @@ This repository is for a constrained embedded target, not a certified HSM. That 
 - No `unwrap`, `expect`, `todo`, `dbg!`, or intentional panics in security-sensitive paths.
 - No new transport or storage format without bounds checking, negative tests, and malformed-input handling.
 - No new managed crypto operation without explicit usage binding, readable denial paths, and hardware regression against the user-facing CLI.
+- No new public interoperability helper, derive workflow, or wrapped-export path without documenting how external inputs are bounded, authenticated where required, and prevented from becoming a key-cloning loophole.
 - No feature that mixes debug convenience with production behavior.
 - No secret material in unit-test fixtures, example code, or committed logs.
 

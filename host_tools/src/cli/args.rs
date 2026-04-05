@@ -1,5 +1,8 @@
 use super::output::CliError;
-use crate::client::{DeveloperFaultAction, ManagedAlgorithm, PolicyProfileUpdate, Role, VerifyAlgorithm};
+use crate::client::{
+    DeveloperFaultAction, ManagedAlgorithm, ManagedExportPolicy, PolicyProfileUpdate, Role,
+    VerifyAlgorithm,
+};
 
 pub const DEFAULT_BAUD: u32 = 115_200;
 
@@ -40,15 +43,31 @@ pub enum CommandSpec {
     RecoverToProvisioned { auth: AuthOptions },
     ReactivateRecovered { transition_id: u32, auth: AuthOptions },
     GetRandom { bytes: u8, auth: AuthOptions },
-    GenerateKey { algorithm: ManagedAlgorithm, usage: String, auth: AuthOptions },
+    GenerateKey {
+        algorithm: ManagedAlgorithm,
+        usage: String,
+        export_policy: ManagedExportPolicy,
+        auth: AuthOptions,
+    },
     SymEncrypt { key_id: u8, algorithm: ManagedAlgorithm, auth: AuthOptions },
     SymDecrypt { key_id: u8, algorithm: ManagedAlgorithm, auth: AuthOptions },
     AsymEncrypt { key_id: u8, algorithm: ManagedAlgorithm, auth: AuthOptions },
     AsymDecrypt { key_id: u8, algorithm: ManagedAlgorithm, auth: AuthOptions },
+    SenderEncrypt { algorithm: ManagedAlgorithm, public_key_hex: String },
     GetAuditPage {
         start_sequence: u32,
         max_events: u8,
         one_line: bool,
+        auth: AuthOptions,
+    },
+    Mac { key_id: u8, auth: AuthOptions },
+    VerifyMac { key_id: u8, mac_hex: String, auth: AuthOptions },
+    Derive {
+        key_id: u8,
+        algorithm: ManagedAlgorithm,
+        peer_public_key_hex: String,
+        context_hex: String,
+        bytes: u8,
         auth: AuthOptions,
     },
     Sign { key_id: u8, auth: AuthOptions },
@@ -58,6 +77,7 @@ pub enum CommandSpec {
         signature_hex: String,
     },
     ImportWrappedKey { auth: AuthOptions },
+    ExportWrappedKey { key_id: u8, wrapping_key_id: u8, auth: AuthOptions },
     ListKeys { auth: AuthOptions },
     GetKeyMetadata { key_id: u8, auth: AuthOptions },
     RevokeKey { key_id: u8, auth: AuthOptions },
@@ -105,14 +125,19 @@ where
     let mut image = None;
     let mut version = None;
     let mut public_key_hex = None;
+    let mut peer_public_key_hex = None;
     let mut signature_hex = None;
+    let mut mac_hex = None;
+    let mut context_hex = None;
     let mut transition_id = None;
     let mut session_id = None;
+    let mut wrapping_key_id = None;
     let mut action = None;
     let mut dual_control = None;
     let mut start_sequence = None;
     let mut max_events = None;
     let mut one_line = false;
+    let mut export_policy = None;
 
     let mut idx = 0usize;
     while idx < rest.len() {
@@ -211,12 +236,33 @@ where
                 };
                 public_key_hex = Some(value.clone());
             }
+            "--peer-public-key-hex" => {
+                idx += 1;
+                let Some(value) = rest.get(idx) else {
+                    return Err(CliError::usage("missing value for --peer-public-key-hex"));
+                };
+                peer_public_key_hex = Some(value.clone());
+            }
             "--signature-hex" => {
                 idx += 1;
                 let Some(value) = rest.get(idx) else {
                     return Err(CliError::usage("missing value for --signature-hex"));
                 };
                 signature_hex = Some(value.clone());
+            }
+            "--mac-hex" => {
+                idx += 1;
+                let Some(value) = rest.get(idx) else {
+                    return Err(CliError::usage("missing value for --mac-hex"));
+                };
+                mac_hex = Some(value.clone());
+            }
+            "--context-hex" => {
+                idx += 1;
+                let Some(value) = rest.get(idx) else {
+                    return Err(CliError::usage("missing value for --context-hex"));
+                };
+                context_hex = Some(value.clone());
             }
             "--transition-id" => {
                 idx += 1;
@@ -231,6 +277,20 @@ where
                     return Err(CliError::usage("missing value for --session-id"));
                 };
                 session_id = Some(parse_u32(value)?);
+            }
+            "--wrapping-key-id" => {
+                idx += 1;
+                let Some(value) = rest.get(idx) else {
+                    return Err(CliError::usage("missing value for --wrapping-key-id"));
+                };
+                wrapping_key_id = Some(parse_u8(value)?);
+            }
+            "--export-policy" => {
+                idx += 1;
+                let Some(value) = rest.get(idx) else {
+                    return Err(CliError::usage("missing value for --export-policy"));
+                };
+                export_policy = Some(ManagedExportPolicy::parse(value)?);
             }
             "--action" => {
                 idx += 1;
@@ -285,14 +345,19 @@ where
         image,
         version,
         public_key_hex,
+        peer_public_key_hex,
         signature_hex,
+        mac_hex,
+        context_hex,
         transition_id,
         session_id,
+        wrapping_key_id,
         action,
         dual_control,
         start_sequence,
         max_events,
         one_line,
+        export_policy,
     )?;
 
     Ok(ParsedArgs { global, command })
@@ -357,14 +422,19 @@ fn build_command(
     image: Option<String>,
     version: Option<String>,
     public_key_hex: Option<String>,
+    peer_public_key_hex: Option<String>,
     signature_hex: Option<String>,
+    mac_hex: Option<String>,
+    context_hex: Option<String>,
     transition_id: Option<u32>,
     session_id: Option<u32>,
+    wrapping_key_id: Option<u8>,
     action: Option<DeveloperFaultAction>,
     dual_control: Option<bool>,
     start_sequence: Option<u32>,
     max_events: Option<u8>,
     one_line: bool,
+    export_policy: Option<ManagedExportPolicy>,
 ) -> Result<CommandSpec, CliError> {
     match command_name {
         "find" => Ok(CommandSpec::Find),
@@ -457,6 +527,7 @@ fn build_command(
             algorithm: managed_algorithm
                 .ok_or_else(|| CliError::usage("missing --algorithm for generate-key"))?,
             usage: usage.ok_or_else(|| CliError::usage("missing --usage for generate-key"))?,
+            export_policy: export_policy.unwrap_or(ManagedExportPolicy::NonExportable),
             auth: parse_auth(role, proof_env, &[Role::KeyManager])?,
         }),
         "sym-encrypt" => Ok(CommandSpec::SymEncrypt {
@@ -483,11 +554,36 @@ fn build_command(
                 .ok_or_else(|| CliError::usage("missing --algorithm for asym-decrypt"))?,
             auth: parse_auth(role, proof_env, &[Role::KeyManager])?,
         }),
+        "sender-encrypt" => Ok(CommandSpec::SenderEncrypt {
+            algorithm: managed_algorithm
+                .ok_or_else(|| CliError::usage("missing --algorithm for sender-encrypt"))?,
+            public_key_hex: public_key_hex
+                .ok_or_else(|| CliError::usage("missing --public-key-hex for sender-encrypt"))?,
+        }),
         "get-audit-page" | "audit-page" => Ok(CommandSpec::GetAuditPage {
             start_sequence: start_sequence.unwrap_or(0),
             max_events: max_events.ok_or_else(|| CliError::usage("missing --max-events for get-audit-page"))?,
             one_line,
             auth: parse_auth(role, proof_env, &[Role::Administrator, Role::Recovery])?,
+        }),
+        "mac" => Ok(CommandSpec::Mac {
+            key_id: key_id.ok_or_else(|| CliError::usage("missing --key-id for mac"))?,
+            auth: parse_auth(role, proof_env, &[Role::KeyManager])?,
+        }),
+        "verify-mac" => Ok(CommandSpec::VerifyMac {
+            key_id: key_id.ok_or_else(|| CliError::usage("missing --key-id for verify-mac"))?,
+            mac_hex: mac_hex.ok_or_else(|| CliError::usage("missing --mac-hex for verify-mac"))?,
+            auth: parse_auth(role, proof_env, &[Role::KeyManager])?,
+        }),
+        "derive" => Ok(CommandSpec::Derive {
+            key_id: key_id.ok_or_else(|| CliError::usage("missing --key-id for derive"))?,
+            algorithm: managed_algorithm
+                .ok_or_else(|| CliError::usage("missing --algorithm for derive"))?,
+            peer_public_key_hex: peer_public_key_hex
+                .ok_or_else(|| CliError::usage("missing --peer-public-key-hex for derive"))?,
+            context_hex: context_hex.unwrap_or_default(),
+            bytes: bytes.ok_or_else(|| CliError::usage("missing --bytes for derive"))?,
+            auth: parse_auth(role, proof_env, &[Role::KeyManager])?,
         }),
         "sign" | "key-sign" => Ok(CommandSpec::Sign {
             key_id: key_id.ok_or_else(|| CliError::usage("missing --key-id for sign"))?,
@@ -501,6 +597,12 @@ fn build_command(
                 .ok_or_else(|| CliError::usage("missing --signature-hex for verify"))?,
         }),
         "import-wrapped-key" | "key-import-wrapped" => Ok(CommandSpec::ImportWrappedKey {
+            auth: parse_auth(role, proof_env, &[Role::KeyManager])?,
+        }),
+        "export-wrapped-key" | "key-export-wrapped" => Ok(CommandSpec::ExportWrappedKey {
+            key_id: key_id.ok_or_else(|| CliError::usage("missing --key-id for export-wrapped-key"))?,
+            wrapping_key_id: wrapping_key_id
+                .ok_or_else(|| CliError::usage("missing --wrapping-key-id for export-wrapped-key"))?,
             auth: parse_auth(role, proof_env, &[Role::KeyManager])?,
         }),
         "list-keys" | "key-list" => Ok(CommandSpec::ListKeys {
@@ -594,11 +696,16 @@ fn command_usage(command: &str, show_all_help: bool) -> String {
         "recover-to-provisioned" => "Usage: rphsmtool recover-to-provisioned [--device PATH] --role recovery --proof-env VAR [--baud 115200]".into(),
         "reactivate-recovered" => "Usage: rphsmtool reactivate-recovered [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]".into(),
         "get-random" => "Usage: rphsmtool get-random [--device PATH] --bytes N --role administrator|key-manager --proof-env VAR [--baud 115200]".into(),
-        "generate-key" => "Usage: rphsmtool generate-key [--device PATH] --algorithm ed25519|p256|chacha20poly1305|aes256gcm|x25519-chacha20poly1305 --usage sign|encrypt,decrypt --role key-manager --proof-env VAR [--baud 115200]".into(),
+        "generate-key" => "Usage: rphsmtool generate-key [--device PATH] --algorithm ed25519|p256|chacha20poly1305|aes256gcm|x25519-chacha20poly1305|hmac-sha256|p256-ecdh-hkdf-sha256 --usage sign|encrypt,decrypt|mac|derive [--export-policy non-exportable|wrapped-only] --role key-manager --proof-env VAR [--baud 115200]".into(),
         "get-audit-page" => "Usage: rphsmtool get-audit-page [--device PATH] [--start-sequence N] --max-events N [--one-line] --role administrator|recovery --proof-env VAR [--baud 115200]".into(),
+        "mac" => "Usage: rphsmtool mac [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin".into(),
+        "verify-mac" => "Usage: rphsmtool verify-mac [--device PATH] --key-id ID --mac-hex HEX --role key-manager --proof-env VAR [--baud 115200] < message.bin".into(),
+        "derive" => "Usage: rphsmtool derive [--device PATH] --key-id ID --algorithm p256-ecdh-hkdf-sha256 --peer-public-key-hex HEX [--context-hex HEX] --bytes N --role key-manager --proof-env VAR [--baud 115200]".into(),
         "sign" => "Usage: rphsmtool sign [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin".into(),
         "verify" => "Usage: rphsmtool verify [--device PATH] --algorithm ed25519|p256 --public-key-hex HEX --signature-hex HEX [--baud 115200] < message.bin".into(),
+        "sender-encrypt" => "Usage: rphsmtool sender-encrypt --algorithm x25519-chacha20poly1305 --public-key-hex HEX < plaintext.bin".into(),
         "import-wrapped-key" => "Usage: rphsmtool import-wrapped-key [--device PATH] --role key-manager --proof-env VAR [--baud 115200] < envelope.bin".into(),
+        "export-wrapped-key" => "Usage: rphsmtool export-wrapped-key [--device PATH] --key-id ID --wrapping-key-id ID --role key-manager --proof-env VAR [--baud 115200] > envelope.bin".into(),
         "list-keys" => "Usage: rphsmtool list-keys [--device PATH] --role key-manager --proof-env VAR [--baud 115200]".into(),
         "get-key-metadata" => "Usage: rphsmtool get-key-metadata [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200]".into(),
         "revoke-key" => "Usage: rphsmtool revoke-key [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200]".into(),
@@ -627,11 +734,15 @@ pub fn usage_text() -> String {
         "User Commands:",
         "  rphsmtool list-algorithms [--device PATH] [--baud 115200]",
         "  rphsmtool get-random [--device PATH] --bytes N --role administrator|key-manager --proof-env VAR [--baud 115200]",
-        "  rphsmtool generate-key [--device PATH] --algorithm ed25519|p256|chacha20poly1305|aes256gcm|x25519-chacha20poly1305 --usage sign|encrypt,decrypt --role key-manager --proof-env VAR [--baud 115200]",
+        "  rphsmtool generate-key [--device PATH] --algorithm ed25519|p256|chacha20poly1305|aes256gcm|x25519-chacha20poly1305|hmac-sha256|p256-ecdh-hkdf-sha256 --usage sign|encrypt,decrypt|mac|derive [--export-policy non-exportable|wrapped-only] --role key-manager --proof-env VAR [--baud 115200]",
         "  rphsmtool sym-encrypt [--device PATH] --key-id ID --algorithm chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < plaintext.bin",
         "  rphsmtool sym-decrypt [--device PATH] --key-id ID --algorithm chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < ciphertext.bin",
         "  rphsmtool asym-encrypt [--device PATH] --key-id ID --algorithm x25519-chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < plaintext.bin",
         "  rphsmtool asym-decrypt [--device PATH] --key-id ID --algorithm x25519-chacha20poly1305 --role key-manager --proof-env VAR [--baud 115200] < ciphertext.bin",
+        "  rphsmtool sender-encrypt --algorithm x25519-chacha20poly1305 --public-key-hex HEX < plaintext.bin",
+        "  rphsmtool mac [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin",
+        "  rphsmtool verify-mac [--device PATH] --key-id ID --mac-hex HEX --role key-manager --proof-env VAR [--baud 115200] < message.bin",
+        "  rphsmtool derive [--device PATH] --key-id ID --algorithm p256-ecdh-hkdf-sha256 --peer-public-key-hex HEX [--context-hex HEX] --bytes N --role key-manager --proof-env VAR [--baud 115200]",
         "  rphsmtool sign [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin",
         "  rphsmtool verify [--device PATH] --algorithm ed25519|p256 --public-key-hex HEX --signature-hex HEX [--baud 115200] < message.bin",
         "  rphsmtool list-keys [--device PATH] --role key-manager --proof-env VAR [--baud 115200]",
@@ -655,6 +766,7 @@ pub fn usage_text() -> String {
         "  rphsmtool recovery reactivate [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool recover-trusted-firmware [--device PATH] --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool key import-wrapped [--device PATH] --role key-manager --proof-env VAR [--baud 115200] < envelope.bin",
+        "  rphsmtool export-wrapped-key [--device PATH] --key-id ID --wrapping-key-id ID --role key-manager --proof-env VAR [--baud 115200] > envelope.bin",
         "  rphsmtool key revoke [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200]",
         "  rphsmtool key destroy [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200]",
         "",
@@ -716,12 +828,17 @@ pub fn all_usage_text() -> String {
         "  rphsmtool reactivate-recovered [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool recovery reactivate [--device PATH] --transition-id ID --role recovery --proof-env VAR [--baud 115200]",
         "  rphsmtool get-random [--device PATH] --bytes N --role administrator|key-manager --proof-env VAR [--baud 115200]",
-        "  rphsmtool generate-key [--device PATH] --algorithm ed25519|p256|chacha20poly1305|aes256gcm|x25519-chacha20poly1305 --usage sign|encrypt,decrypt --role key-manager --proof-env VAR [--baud 115200]",
+        "  rphsmtool generate-key [--device PATH] --algorithm ed25519|p256|chacha20poly1305|aes256gcm|x25519-chacha20poly1305|hmac-sha256|p256-ecdh-hkdf-sha256 --usage sign|encrypt,decrypt|mac|derive [--export-policy non-exportable|wrapped-only] --role key-manager --proof-env VAR [--baud 115200]",
         "  rphsmtool get-audit-page [--device PATH] [--start-sequence N] --max-events N [--one-line] --role administrator|recovery --proof-env VAR [--baud 115200]",
+        "  rphsmtool mac [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin",
+        "  rphsmtool verify-mac [--device PATH] --key-id ID --mac-hex HEX --role key-manager --proof-env VAR [--baud 115200] < message.bin",
+        "  rphsmtool derive [--device PATH] --key-id ID --algorithm p256-ecdh-hkdf-sha256 --peer-public-key-hex HEX [--context-hex HEX] --bytes N --role key-manager --proof-env VAR [--baud 115200]",
         "  rphsmtool sign [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin",
         "  rphsmtool key sign [--device PATH] --key-id ID --role key-manager --proof-env VAR [--baud 115200] < message.bin",
         "  rphsmtool verify [--device PATH] --algorithm ed25519|p256 --public-key-hex HEX --signature-hex HEX [--baud 115200] < message.bin",
+        "  rphsmtool sender-encrypt --algorithm x25519-chacha20poly1305 --public-key-hex HEX < plaintext.bin",
         "  rphsmtool import-wrapped-key [--device PATH] --role key-manager --proof-env VAR [--baud 115200] < envelope.bin",
+        "  rphsmtool export-wrapped-key [--device PATH] --key-id ID --wrapping-key-id ID --role key-manager --proof-env VAR [--baud 115200] > envelope.bin",
         "  rphsmtool key import-wrapped [--device PATH] --role key-manager --proof-env VAR [--baud 115200] < envelope.bin",
         "  rphsmtool list-keys [--device PATH] --role key-manager --proof-env VAR [--baud 115200]",
         "  rphsmtool key list [--device PATH] --role key-manager --proof-env VAR [--baud 115200]",

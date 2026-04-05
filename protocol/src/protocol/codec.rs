@@ -8,18 +8,18 @@ use super::state::{
     AlgorithmProfile, ApprovalTicket,
     AuditEvent, AuditRetrievalCursor, AuthorityRole, BeginFirmwareUpdateRequest, BootSlotId,
     CHACHA20POLY1305_NONCE_LEN, CryptoCapabilities, DecryptRequest, DecryptResponse,
-    DenialClass, DeveloperResetOutcome, DeviceState, EncryptRequest, EncryptResponse,
-    ExportPolicy, FirmwareAbortResult, FirmwareActivationResult, FirmwareChunkProgress,
+    DenialClass, DeriveRequest, DeveloperResetOutcome, DeviceState, EncryptRequest, EncryptResponse,
+    ExportPolicy, ExportWrappedKeyRequest, FirmwareAbortResult, FirmwareActivationResult, FirmwareChunkProgress,
     FirmwareChunkRequest, FirmwareFinalizeResult, FirmwarePackageManifest, FirmwareRecoveryResult,
     FirmwareUpdateBeginResult, FirmwareUpdateStatus, FirmwareVersion, GenerateKeyRequest,
     HealthStatusView, ImportWrappedKeyRequest, KeyAlgorithm, KeyDestroyResult, KeyListEntry,
     KeyMaterialEnvelope, KeyMetadataView, KeyOrigin, KeyRecordResult, KeyStoreStatus,
-    LifecycleStatus, LockResult, MAX_ALGORITHM_PROFILES, MAX_CIPHERTEXT_LEN,
-    MAX_CRYPTO_MESSAGE_LEN, MAX_FIRMWARE_CHUNK_LEN, MAX_FIRMWARE_SIGNATURE_LEN,
+    LifecycleStatus, LockResult, MacRequest, MAX_ALGORITHM_PROFILES, MAX_CIPHERTEXT_LEN,
+    MAX_CRYPTO_MESSAGE_LEN, MAX_DERIVE_CONTEXT_LEN, MAX_DERIVED_OUTPUT_LEN, MAX_FIRMWARE_CHUNK_LEN, MAX_FIRMWARE_SIGNATURE_LEN,
     MAX_ENCRYPT_HEADER_LEN, MAX_RANDOM_OUTPUT_LEN, MAX_SIGNATURE_LEN, MAX_WRAPPED_CIPHERTEXT_LEN,
-    MAX_WRAPPED_TAG_LEN, P256_PUBLIC_KEY_LEN, PolicyProfile, PutPersistentKeyRequest,
+    MAX_WRAPPED_TAG_LEN, MAX_MAC_LEN, P256_PUBLIC_KEY_LEN, PolicyProfile, PutPersistentKeyRequest,
     RandomRequest, RecoveryResult, SessionState, SessionStatus, SignRequest, StateRevision, TransitionResult,
-    UPDATE_MANIFEST_VERSION, VerifyRequest, ZeroizeOutcome,
+    UPDATE_MANIFEST_VERSION, VerifyMacRequest, VerifyRequest, ZeroizeOutcome,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -443,9 +443,41 @@ pub fn encode_algorithm_profiles_payload(
     payload.push(u8::try_from(profiles.len()).ok()?).ok()?;
     for profile in profiles {
         payload.push(profile.algorithm as u8).ok()?;
-        payload.push(profile.operation_mask).ok()?;
+        payload
+            .extend_from_slice(&profile.operation_mask.to_le_bytes())
+            .ok()?;
         payload.push(profile.public_material_len).ok()?;
     }
+    Some(payload)
+}
+
+#[must_use]
+pub fn encode_mac_payload(mac: &[u8]) -> Option<Vec<u8, MAX_PAYLOAD_LEN>> {
+    let mut payload = Vec::new();
+    payload.push(u8::try_from(mac.len()).ok()?).ok()?;
+    payload.extend_from_slice(mac).ok()?;
+    Some(payload)
+}
+
+#[must_use]
+pub fn encode_derive_response_payload(bytes: &[u8]) -> Option<Vec<u8, MAX_PAYLOAD_LEN>> {
+    let mut payload = Vec::new();
+    payload.push(u8::try_from(bytes.len()).ok()?).ok()?;
+    payload.extend_from_slice(bytes).ok()?;
+    Some(payload)
+}
+
+#[must_use]
+pub fn encode_wrapped_key_export_payload(envelope: &[u8]) -> Option<Vec<u8, MAX_PAYLOAD_LEN>> {
+    let mut payload = Vec::new();
+    payload
+        .extend_from_slice(
+            &u16::try_from(envelope.len())
+                .ok()?
+                .to_le_bytes(),
+        )
+        .ok()?;
+    payload.extend_from_slice(envelope).ok()?;
     Some(payload)
 }
 
@@ -714,12 +746,17 @@ pub fn encode_decrypt_response_payload(
 ///
 /// Returns `StatusCode::ValidationError` when the generate-key request is malformed.
 pub fn decode_generate_key_request(payload: &[u8]) -> Result<GenerateKeyRequest, StatusCode> {
-    if payload.len() != 2 {
+    if !matches!(payload.len(), 2 | 3) {
         return Err(StatusCode::ValidationError);
     }
     Ok(GenerateKeyRequest {
         algorithm: KeyAlgorithm::from_byte(payload[0]).ok_or(StatusCode::ValidationError)?,
         usage_mask: payload[1],
+        export_policy: if payload.len() == 3 {
+            ExportPolicy::from_byte(payload[2]).ok_or(StatusCode::ValidationError)?
+        } else {
+            ExportPolicy::NonExportable
+        },
     })
 }
 
@@ -857,7 +894,10 @@ pub fn decode_decrypt_request(payload: &[u8]) -> Result<DecryptRequest, StatusCo
     let expected_nonce_len = match algorithm {
         KeyAlgorithm::ChaCha20Poly1305 | KeyAlgorithm::Aes256Gcm => CHACHA20POLY1305_NONCE_LEN,
         KeyAlgorithm::X25519ChaCha20Poly1305 => MAX_ENCRYPT_HEADER_LEN,
-        KeyAlgorithm::Ed25519 | KeyAlgorithm::P256 => return Err(StatusCode::ValidationError),
+        KeyAlgorithm::Ed25519
+        | KeyAlgorithm::P256
+        | KeyAlgorithm::HmacSha256
+        | KeyAlgorithm::P256EcdhHkdfSha256 => return Err(StatusCode::ValidationError),
     };
     if nonce_len != expected_nonce_len {
         return Err(StatusCode::ValidationError);
@@ -889,6 +929,124 @@ pub fn decode_decrypt_request(payload: &[u8]) -> Result<DecryptRequest, StatusCo
         algorithm,
         nonce,
         ciphertext,
+    })
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the MAC request shape is malformed.
+pub fn decode_mac_request(payload: &[u8]) -> Result<MacRequest, StatusCode> {
+    if payload.len() < 4 {
+        return Err(StatusCode::ValidationError);
+    }
+    let key_id = payload[0];
+    let algorithm = KeyAlgorithm::from_byte(payload[1]).ok_or(StatusCode::ValidationError)?;
+    let message_len = usize::from(u16::from_le_bytes([payload[2], payload[3]]));
+    if message_len == 0 || message_len > MAX_CRYPTO_MESSAGE_LEN || payload.len() != 4 + message_len {
+        return Err(StatusCode::ValidationError);
+    }
+    let mut message = Vec::<u8, MAX_CRYPTO_MESSAGE_LEN>::new();
+    message
+        .extend_from_slice(&payload[4..])
+        .map_err(|()| StatusCode::ValidationError)?;
+    Ok(MacRequest {
+        key_id,
+        algorithm,
+        message,
+    })
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the verify-MAC request shape is malformed.
+pub fn decode_verify_mac_request(payload: &[u8]) -> Result<VerifyMacRequest, StatusCode> {
+    if payload.len() < 5 {
+        return Err(StatusCode::ValidationError);
+    }
+    let key_id = payload[0];
+    let algorithm = KeyAlgorithm::from_byte(payload[1]).ok_or(StatusCode::ValidationError)?;
+    let message_len = usize::from(u16::from_le_bytes([payload[2], payload[3]]));
+    if message_len == 0 || message_len > MAX_CRYPTO_MESSAGE_LEN {
+        return Err(StatusCode::ValidationError);
+    }
+    let mac_len_index = 4 + message_len;
+    if payload.len() < mac_len_index + 1 {
+        return Err(StatusCode::ValidationError);
+    }
+    let mac_len = usize::from(payload[mac_len_index]);
+    if mac_len == 0 || mac_len > MAX_MAC_LEN || payload.len() != mac_len_index + 1 + mac_len {
+        return Err(StatusCode::ValidationError);
+    }
+    let mut message = Vec::<u8, MAX_CRYPTO_MESSAGE_LEN>::new();
+    message
+        .extend_from_slice(&payload[4..mac_len_index])
+        .map_err(|()| StatusCode::ValidationError)?;
+    let mut mac = Vec::<u8, MAX_MAC_LEN>::new();
+    mac.extend_from_slice(&payload[mac_len_index + 1..])
+        .map_err(|()| StatusCode::ValidationError)?;
+    Ok(VerifyMacRequest {
+        key_id,
+        algorithm,
+        message,
+        mac,
+    })
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the derive request shape is malformed.
+pub fn decode_derive_request(payload: &[u8]) -> Result<DeriveRequest, StatusCode> {
+    if payload.len() < 5 {
+        return Err(StatusCode::ValidationError);
+    }
+    let key_id = payload[0];
+    let algorithm = KeyAlgorithm::from_byte(payload[1]).ok_or(StatusCode::ValidationError)?;
+    let peer_len = usize::from(payload[2]);
+    if peer_len == 0 || peer_len > P256_PUBLIC_KEY_LEN {
+        return Err(StatusCode::ValidationError);
+    }
+    let context_len_index = 3 + peer_len;
+    if payload.len() < context_len_index + 1 {
+        return Err(StatusCode::ValidationError);
+    }
+    let context_len = usize::from(payload[context_len_index]);
+    let requested_len_index = context_len_index + 1 + context_len;
+    if context_len > MAX_DERIVE_CONTEXT_LEN || payload.len() != requested_len_index + 1 {
+        return Err(StatusCode::ValidationError);
+    }
+    let requested_len = payload[requested_len_index];
+    if requested_len == 0 || usize::from(requested_len) > MAX_DERIVED_OUTPUT_LEN {
+        return Err(StatusCode::ValidationError);
+    }
+    let mut peer_public_material = Vec::<u8, P256_PUBLIC_KEY_LEN>::new();
+    peer_public_material
+        .extend_from_slice(&payload[3..3 + peer_len])
+        .map_err(|()| StatusCode::ValidationError)?;
+    let mut context = Vec::<u8, MAX_DERIVE_CONTEXT_LEN>::new();
+    context
+        .extend_from_slice(&payload[context_len_index + 1..requested_len_index])
+        .map_err(|()| StatusCode::ValidationError)?;
+    Ok(DeriveRequest {
+        key_id,
+        algorithm,
+        peer_public_material,
+        context,
+        requested_len,
+    })
+}
+
+/// # Errors
+///
+/// Returns `StatusCode::ValidationError` when the wrapped-export request is malformed.
+pub fn decode_export_wrapped_key_request(
+    payload: &[u8],
+) -> Result<ExportWrappedKeyRequest, StatusCode> {
+    if payload.len() != 2 {
+        return Err(StatusCode::ValidationError);
+    }
+    Ok(ExportWrappedKeyRequest {
+        wrapping_key_id: payload[0],
+        target_key_id: payload[1],
     })
 }
 

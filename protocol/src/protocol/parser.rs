@@ -7,11 +7,14 @@ use chacha20poly1305::{
     aead::generic_array::GenericArray,
 };
 use ed25519_dalek::{Signer, Verifier};
+use hmac::{Hmac, Mac};
 use hkdf::Hkdf;
 use heapless::Vec;
+use p256::ecdh::diffie_hellman;
 use p256::ecdsa::{
     Signature as P256Signature, SigningKey as P256SigningKey, VerifyingKey as P256VerifyingKey,
 };
+use p256::{PublicKey as P256PublicKey, SecretKey as P256SecretKey};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
 
@@ -19,10 +22,12 @@ use super::codec::{
     DecodeError, StatusCode, clear_bytes, decode_audit_page_request,
     decode_authentication_role, decode_authorized_payload,
     decode_begin_firmware_update_request, decode_complete_authentication_request,
-    decode_decrypt_request, decode_encrypt_request, decode_firmware_chunk_request, decode_frame,
+    decode_decrypt_request, decode_derive_request, decode_encrypt_request,
+    decode_export_wrapped_key_request, decode_firmware_chunk_request, decode_frame,
     decode_generate_key_request, decode_import_wrapped_key_request, decode_key_id_request,
     decode_key_marker_request, decode_put_persistent_key_request, decode_random_request,
-    decode_sign_request, decode_transition_request, decode_verify_request,
+    decode_sign_request, decode_transition_request, decode_verify_mac_request,
+    decode_verify_request, decode_mac_request,
     encode_algorithm_profiles_payload, encode_audit_page_payload, encode_auth_challenge_payload,
     encode_auth_session_payload, encode_crypto_capabilities_payload, encode_decrypt_response_payload,
     encode_developer_reset_payload, encode_device_status_payload, encode_encrypt_response_payload,
@@ -35,6 +40,7 @@ use super::codec::{
     encode_lifecycle_status_payload, encode_lock_result_payload, encode_policy_denial_payload,
     encode_policy_profile_payload, encode_random_payload, encode_recovery_result_payload,
     encode_session_status_payload, encode_signature_payload, encode_state_revision_payload,
+    encode_wrapped_key_export_payload, encode_mac_payload, encode_derive_response_payload,
     encode_transition_result_payload, encode_verify_result_payload, encode_zeroize_payload,
     policy_status_response, protocol_version_response, status_response,
 };
@@ -56,7 +62,7 @@ use super::state::{
     X25519_PUBLIC_KEY_LEN,
     UPDATE_SIGNATURE_ALGORITHM_ED25519, UpdateRecoveryReason, UpdateResultClass,
     UpdateTransferPhase, UpdateTransferState, USAGE_DECRYPT, USAGE_ENCRYPT, USAGE_SIGN,
-    USAGE_WRAP_IMPORT,
+    USAGE_WRAP_IMPORT, USAGE_DERIVE, USAGE_MAC,
     AcceptedFirmwareState, clear_active_session, default_boot_slots,
     clear_approval_tickets, clear_auth_failures, clear_challenge, clear_failure_counters,
     clear_secret_array, current_session_state, current_session_status, developer_mode_session,
@@ -102,6 +108,9 @@ pub enum FirmwareAction {
 
 const UPDATE_TRUST_ANCHOR_SEED: &[u8; 32] = b"rp_hsm_update_anchor_seed_v1____";
 const ASYMMETRIC_ENCRYPT_INFO: &[u8] = b"rp_hsm.asym_encrypt.v1";
+const DERIVE_INFO_PREFIX: &[u8] = b"rp_hsm.derive.v1";
+const WRAP_EXPORT_AAD: &[u8] = b"rp_hsm.wrap.v1";
+type HmacSha256 = Hmac<Sha256>;
 
 pub struct ProtocolEngine {
     record: ProvisioningRecord,
@@ -647,13 +656,22 @@ impl ProtocolEngine {
         max_inner_len: usize,
     ) -> Result<(u32, Vec<u8, N>), StatusCode> {
         if self.active_session.is_none() && self.legacy_role_active(role) {
-            if payload.len() < min_inner_len || payload.len() > max_inner_len {
-                return Err(StatusCode::ValidationError);
-            }
             let mut owned = Vec::<u8, N>::new();
-            owned
-                .extend_from_slice(payload)
-                .map_err(|()| StatusCode::ValidationError)?;
+            if payload.len() > max_inner_len
+                && let Ok((_, _, inner)) =
+                    decode_authorized_payload(payload, min_inner_len, max_inner_len)
+            {
+                owned
+                    .extend_from_slice(inner)
+                    .map_err(|()| StatusCode::ValidationError)?;
+            } else {
+                if payload.len() < min_inner_len || payload.len() > max_inner_len {
+                    return Err(StatusCode::ValidationError);
+                }
+                owned
+                    .extend_from_slice(payload)
+                    .map_err(|()| StatusCode::ValidationError)?;
+            }
             return Ok((0, owned));
         }
         let (request_counter, inner) =
@@ -675,13 +693,22 @@ impl ProtocolEngine {
         if self.active_session.is_none() {
             for &role in roles {
                 if self.legacy_role_active(role) {
-                    if payload.len() < min_inner_len || payload.len() > max_inner_len {
-                        return Err(StatusCode::ValidationError);
-                    }
                     let mut owned = Vec::<u8, N>::new();
-                    owned
-                        .extend_from_slice(payload)
-                        .map_err(|()| StatusCode::ValidationError)?;
+                    if payload.len() > max_inner_len
+                        && let Ok((_, _, inner)) =
+                            decode_authorized_payload(payload, min_inner_len, max_inner_len)
+                    {
+                        owned
+                            .extend_from_slice(inner)
+                            .map_err(|()| StatusCode::ValidationError)?;
+                    } else {
+                        if payload.len() < min_inner_len || payload.len() > max_inner_len {
+                            return Err(StatusCode::ValidationError);
+                        }
+                        owned
+                            .extend_from_slice(payload)
+                            .map_err(|()| StatusCode::ValidationError)?;
+                    }
                     return Ok((0, owned, role));
                 }
             }
@@ -806,11 +833,15 @@ impl ProtocolEngine {
             Some(CommandId::DeveloperReboot) => self.handle_developer_reboot(frame),
             Some(CommandId::DeveloperSetPolicy) => self.handle_developer_set_policy(frame),
             Some(CommandId::GenerateKey) => self.handle_generate_key(frame),
+            Some(CommandId::GenerateMac) => self.handle_generate_mac(frame),
+            Some(CommandId::VerifyMac) => self.handle_verify_mac(frame),
             Some(CommandId::SignDetached) => self.handle_sign_detached(frame),
             Some(CommandId::GenerateRandom) => self.handle_generate_random(frame),
             Some(CommandId::ImportWrappedKey) => self.handle_import_wrapped_key(frame),
+            Some(CommandId::ExportWrappedKey) => self.handle_export_wrapped_key(frame),
             Some(CommandId::Encrypt) => self.handle_encrypt(frame),
             Some(CommandId::Decrypt) => self.handle_decrypt(frame),
+            Some(CommandId::DeriveSharedSecret) => self.handle_derive_shared_secret(frame),
             Some(CommandId::GetFirmwareUpdateStatus) => self.handle_get_firmware_update_status(frame),
             Some(CommandId::BeginFirmwareUpdate) => self.handle_begin_firmware_update(frame),
             Some(CommandId::TransferFirmwareChunk) => self.handle_transfer_firmware_chunk(frame),
@@ -819,9 +850,6 @@ impl ProtocolEngine {
             Some(CommandId::AbortFirmwareUpdate) => self.handle_abort_firmware_update(frame),
             Some(CommandId::RecoverTrustedFirmware) => self.handle_recover_trusted_firmware(frame),
             Some(CommandId::DeveloperUpdateFault) => self.handle_developer_update_fault(frame),
-            Some(CommandId::ExportWrappedKey | CommandId::DeriveSharedSecret) => {
-                status_response(StatusCode::CommandError, &[])
-            }
             None => status_response(StatusCode::CommandError, &[]),
         }
     }
@@ -1889,11 +1917,11 @@ impl ProtocolEngine {
     }
 
     fn handle_revoke_persistent_key(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
-        let (_, inner) = match self.authorize_privileged_owned::<2>(
+        let (_, inner) = match self.authorize_privileged_owned::<3>(
             AuthorityRole::KeyManager,
             frame.payload.as_slice(),
             2,
-            2,
+            3,
         ) {
             Ok(values) => values,
             Err(status) => return status_response(status, &[]),
@@ -1986,11 +2014,11 @@ impl ProtocolEngine {
 
     #[allow(clippy::too_many_lines)]
     fn handle_generate_key(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
-        let (_, inner) = match self.authorize_privileged_owned::<2>(
+        let (_, inner) = match self.authorize_privileged_owned::<3>(
             AuthorityRole::KeyManager,
             frame.payload.as_slice(),
             2,
-            2,
+            3,
         ) {
             Ok(values) => values,
             Err(status) => return status_response(status, &[]),
@@ -2000,6 +2028,15 @@ impl ProtocolEngine {
             Err(status) => return status_response(status, &[]),
         };
 
+        let export_policy = match request.algorithm {
+            KeyAlgorithm::Ed25519
+            | KeyAlgorithm::P256
+            | KeyAlgorithm::P256EcdhHkdfSha256
+            | KeyAlgorithm::HmacSha256
+            | KeyAlgorithm::X25519ChaCha20Poly1305
+            | KeyAlgorithm::ChaCha20Poly1305
+            | KeyAlgorithm::Aes256Gcm => request.export_policy,
+        };
         let (expected_usage_mask, material_bytes) = match request.algorithm {
             KeyAlgorithm::Ed25519 => {
                 if request.usage_mask != USAGE_SIGN {
@@ -2077,12 +2114,44 @@ impl ProtocolEngine {
                 };
                 (USAGE_ENCRYPT | USAGE_DECRYPT, bytes)
             }
+            KeyAlgorithm::HmacSha256 => {
+                if request.usage_mask != USAGE_MAC {
+                    return status_response(StatusCode::AuthorizationError, &[]);
+                }
+                let bytes = match self
+                    .crypto_state
+                    .generate_random_bytes(super::state::MAX_KEY_MATERIAL_LEN)
+                {
+                    Ok(bytes) => bytes,
+                    Err(StatusCode::StateError) => {
+                        return status_response(StatusCode::InternalError, &[]);
+                    }
+                    Err(status) => return status_response(status, &[]),
+                };
+                (USAGE_MAC, bytes)
+            }
+            KeyAlgorithm::P256EcdhHkdfSha256 => {
+                if request.usage_mask != USAGE_DERIVE {
+                    return status_response(StatusCode::AuthorizationError, &[]);
+                }
+                let bytes = match self
+                    .crypto_state
+                    .generate_random_bytes(super::state::MAX_KEY_MATERIAL_LEN)
+                {
+                    Ok(bytes) => bytes,
+                    Err(StatusCode::StateError) => {
+                        return status_response(StatusCode::InternalError, &[]);
+                    }
+                    Err(status) => return status_response(status, &[]),
+                };
+                (USAGE_DERIVE, bytes)
+            }
         };
 
         match self.key_store.store_generated_key(
             request.algorithm,
             expected_usage_mask,
-            super::state::ExportPolicy::NonExportable,
+            export_policy,
             material_bytes.as_slice(),
         ) {
             Ok(result) => {
@@ -2171,7 +2240,9 @@ impl ProtocolEngine {
             }
             KeyAlgorithm::ChaCha20Poly1305
             | KeyAlgorithm::Aes256Gcm
-            | KeyAlgorithm::X25519ChaCha20Poly1305 => {
+            | KeyAlgorithm::X25519ChaCha20Poly1305
+            | KeyAlgorithm::HmacSha256
+            | KeyAlgorithm::P256EcdhHkdfSha256 => {
                 status_response(StatusCode::AuthorizationError, &[])
             }
         };
@@ -2184,6 +2255,164 @@ impl ProtocolEngine {
         clear_secret_array(&mut key_bytes);
         clear_bytes(inner.as_mut_slice());
         response
+    }
+
+    #[allow(clippy::single_match_else)]
+    fn handle_generate_mac(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        let (_, mut inner) = match self.authorize_privileged_owned::<140>(
+            AuthorityRole::KeyManager,
+            frame.payload.as_slice(),
+            5,
+            132,
+        ) {
+            Ok(values) => values,
+            Err(status) => return status_response(status, &[]),
+        };
+        let request = match decode_mac_request(inner.as_slice()) {
+            Ok(request) => request,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let metadata = match self.key_store.get_key_metadata(request.key_id) {
+            Ok(view) => view,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let key_policy = evaluate_key_policy(
+            &metadata,
+            Some(request.algorithm),
+            USAGE_MAC,
+            false,
+            &[KeyLifecycleState::Active],
+        );
+        if !key_policy.decision {
+            clear_bytes(inner.as_mut_slice());
+            return policy_status_response(
+                status_for_denial_class(key_policy.denial_class),
+                key_policy.denial_class,
+                None,
+            );
+        }
+        let mut key_bytes = match self
+            .key_store
+            .export_key_material_for_operation(request.key_id, request.algorithm, USAGE_MAC, false)
+        {
+            Ok(material) => material,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let response = match request.algorithm {
+            KeyAlgorithm::HmacSha256 => {
+                let mut mac: HmacSha256 =
+                    if let Ok(mac) = <HmacSha256 as Mac>::new_from_slice(&key_bytes) {
+                        mac
+                    } else {
+                        clear_secret_array(&mut key_bytes);
+                        clear_bytes(inner.as_mut_slice());
+                        return status_response(StatusCode::InternalError, &[]);
+                    };
+                mac.update(request.message.as_slice());
+                let result = mac.finalize().into_bytes();
+                match encode_mac_payload(result.as_slice()) {
+                    Some(payload) => status_response(StatusCode::Success, &payload),
+                    None => status_response(StatusCode::InternalError, &[]),
+                }
+            }
+            _ => status_response(StatusCode::AuthorizationError, &[]),
+        };
+        self.record_audit_event(
+            AuditEventClass::Administrative,
+            AuditEventCode::CommandCompleted,
+            AuditResultClass::Success,
+            &[frame.code, request.key_id],
+        );
+        clear_secret_array(&mut key_bytes);
+        clear_bytes(inner.as_mut_slice());
+        response
+    }
+
+    #[allow(clippy::single_match_else)]
+    fn handle_verify_mac(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        let (_, mut inner) = match self.authorize_privileged_owned::<173>(
+            AuthorityRole::KeyManager,
+            frame.payload.as_slice(),
+            6,
+            165,
+        ) {
+            Ok(values) => values,
+            Err(status) => return status_response(status, &[]),
+        };
+        let request = match decode_verify_mac_request(inner.as_slice()) {
+            Ok(request) => request,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let metadata = match self.key_store.get_key_metadata(request.key_id) {
+            Ok(view) => view,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let key_policy = evaluate_key_policy(
+            &metadata,
+            Some(request.algorithm),
+            USAGE_MAC,
+            false,
+            &[KeyLifecycleState::Active],
+        );
+        if !key_policy.decision {
+            clear_bytes(inner.as_mut_slice());
+            return policy_status_response(
+                status_for_denial_class(key_policy.denial_class),
+                key_policy.denial_class,
+                None,
+            );
+        }
+        let mut key_bytes = match self
+            .key_store
+            .export_key_material_for_operation(request.key_id, request.algorithm, USAGE_MAC, false)
+        {
+            Ok(material) => material,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let verified = if request.algorithm == KeyAlgorithm::HmacSha256 {
+            let mut mac: HmacSha256 =
+                if let Ok(mac) = <HmacSha256 as Mac>::new_from_slice(&key_bytes) {
+                    mac
+                } else {
+                    clear_secret_array(&mut key_bytes);
+                    clear_bytes(inner.as_mut_slice());
+                    return status_response(StatusCode::InternalError, &[]);
+                };
+            mac.update(request.message.as_slice());
+            mac.verify_slice(request.mac.as_slice()).is_ok()
+        } else {
+            clear_secret_array(&mut key_bytes);
+            clear_bytes(inner.as_mut_slice());
+            return status_response(StatusCode::AuthorizationError, &[]);
+        };
+        let payload = encode_verify_result_payload(verified);
+        self.record_audit_event(
+            AuditEventClass::Administrative,
+            AuditEventCode::CommandCompleted,
+            AuditResultClass::Success,
+            &[frame.code, request.key_id, u8::from(verified)],
+        );
+        clear_secret_array(&mut key_bytes);
+        clear_bytes(inner.as_mut_slice());
+        status_response(StatusCode::Success, &payload)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2387,7 +2616,10 @@ impl ProtocolEngine {
                 clear_secret_array(&mut ephemeral_secret_bytes);
                 clear_secret_array(&mut derived_key);
             }
-            KeyAlgorithm::Ed25519 | KeyAlgorithm::P256 => {
+            KeyAlgorithm::Ed25519
+            | KeyAlgorithm::P256
+            | KeyAlgorithm::HmacSha256
+            | KeyAlgorithm::P256EcdhHkdfSha256 => {
                 clear_secret_array(&mut key_bytes);
                 clear_bytes(inner.as_mut_slice());
                 return status_response(StatusCode::AuthorizationError, &[]);
@@ -2549,7 +2781,10 @@ impl ProtocolEngine {
                 clear_secret_array(&mut derived_key);
                 result
             }
-            KeyAlgorithm::Ed25519 | KeyAlgorithm::P256 => {
+            KeyAlgorithm::Ed25519
+            | KeyAlgorithm::P256
+            | KeyAlgorithm::HmacSha256
+            | KeyAlgorithm::P256EcdhHkdfSha256 => {
                 clear_secret_array(&mut key_bytes);
                 clear_bytes(inner.as_mut_slice());
                 return status_response(StatusCode::AuthorizationError, &[]);
@@ -2610,7 +2845,9 @@ impl ProtocolEngine {
             }
             KeyAlgorithm::ChaCha20Poly1305
             | KeyAlgorithm::Aes256Gcm
-            | KeyAlgorithm::X25519ChaCha20Poly1305 => {
+            | KeyAlgorithm::X25519ChaCha20Poly1305
+            | KeyAlgorithm::HmacSha256
+            | KeyAlgorithm::P256EcdhHkdfSha256 => {
                 return status_response(StatusCode::AuthorizationError, &[])
             }
         };
@@ -2672,7 +2909,6 @@ impl ProtocolEngine {
             }
         };
         if request.wrap_format_version != 0x01
-            || request.target_algorithm != KeyAlgorithm::Ed25519
             || request.target_export_policy != super::state::ExportPolicy::NonExportable
             || request.target_usage_mask == 0
         {
@@ -2756,6 +2992,295 @@ impl ProtocolEngine {
                 status_response(StatusCode::Success, &payload)
             }
             Err(status) => status_response(status, &[]),
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn handle_export_wrapped_key(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        let (_, mut inner) = match self.authorize_privileged_owned::<10>(
+            AuthorityRole::KeyManager,
+            frame.payload.as_slice(),
+            0,
+            2,
+        ) {
+            Ok(values) => values,
+            Err(status) => return status_response(status, &[]),
+        };
+        if inner.is_empty() {
+            clear_bytes(inner.as_mut_slice());
+            return status_response(StatusCode::CommandError, &[]);
+        }
+        let request = match decode_export_wrapped_key_request(inner.as_slice()) {
+            Ok(request) => request,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let wrapping_metadata = match self.key_store.get_key_metadata(request.wrapping_key_id) {
+            Ok(view) => view,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let wrapping_policy = evaluate_key_policy(
+            &wrapping_metadata,
+            Some(KeyAlgorithm::ChaCha20Poly1305),
+            USAGE_WRAP_IMPORT,
+            false,
+            &[KeyLifecycleState::Active],
+        );
+        if !wrapping_policy.decision {
+            clear_bytes(inner.as_mut_slice());
+            return policy_status_response(
+                status_for_denial_class(wrapping_policy.denial_class),
+                wrapping_policy.denial_class,
+                None,
+            );
+        }
+        let target_metadata = match self.key_store.get_key_metadata(request.target_key_id) {
+            Ok(view) => view,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let target_policy = evaluate_key_policy(
+            &target_metadata,
+            Some(target_metadata.algorithm),
+            target_metadata.usage_mask,
+            true,
+            &[KeyLifecycleState::Active],
+        );
+        if !target_policy.decision {
+            clear_bytes(inner.as_mut_slice());
+            return policy_status_response(
+                status_for_denial_class(target_policy.denial_class),
+                target_policy.denial_class,
+                None,
+            );
+        }
+        let mut wrapping_key = match self.key_store.export_key_material_for_operation(
+            request.wrapping_key_id,
+            KeyAlgorithm::ChaCha20Poly1305,
+            USAGE_WRAP_IMPORT,
+            false,
+        ) {
+            Ok(material) => material,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let target_material = match self.key_store.export_key_material_for_operation(
+            request.target_key_id,
+            target_metadata.algorithm,
+            target_metadata.usage_mask,
+            true,
+        ) {
+            Ok(material) => material,
+            Err(status) => {
+                clear_secret_array(&mut wrapping_key);
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let nonce_bytes = match self
+            .crypto_state
+            .generate_random_bytes(super::state::CHACHA20POLY1305_NONCE_LEN)
+        {
+            Ok(bytes) => bytes,
+            Err(StatusCode::StateError) => {
+                clear_secret_array(&mut wrapping_key);
+                clear_bytes(inner.as_mut_slice());
+                return status_response(StatusCode::InternalError, &[]);
+            }
+            Err(status) => {
+                clear_secret_array(&mut wrapping_key);
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&wrapping_key));
+        let nonce = GenericArray::from_slice(nonce_bytes.as_slice());
+        let mut ciphertext = Vec::<u8, { super::state::MAX_KEY_MATERIAL_LEN }>::new();
+        if ciphertext
+            .extend_from_slice(&target_material[..super::state::MAX_KEY_MATERIAL_LEN])
+            .is_err()
+        {
+            clear_secret_array(&mut wrapping_key);
+            clear_bytes(inner.as_mut_slice());
+            return status_response(StatusCode::InternalError, &[]);
+        }
+        let Ok(tag) = cipher.encrypt_in_place_detached(nonce, WRAP_EXPORT_AAD, &mut ciphertext) else {
+            clear_secret_array(&mut wrapping_key);
+            clear_bytes(inner.as_mut_slice());
+            return status_response(StatusCode::InternalError, &[]);
+        };
+        let mut envelope = Vec::<u8, 96>::new();
+        if envelope.push(0x01).is_err()
+            || envelope.push(request.wrapping_key_id).is_err()
+            || envelope.push(target_metadata.algorithm as u8).is_err()
+            || envelope.push(target_metadata.usage_mask).is_err()
+            || envelope
+                .push(super::state::ExportPolicy::NonExportable as u8)
+                .is_err()
+            || envelope
+                .extend_from_slice(
+                    &u16::try_from(ciphertext.len()).unwrap_or(0).to_le_bytes(),
+                )
+                .is_err()
+            || envelope.extend_from_slice(ciphertext.as_slice()).is_err()
+            || envelope.push(28).is_err()
+            || envelope.extend_from_slice(nonce_bytes.as_slice()).is_err()
+            || envelope.extend_from_slice(tag.as_slice()).is_err()
+        {
+            clear_secret_array(&mut wrapping_key);
+            clear_bytes(inner.as_mut_slice());
+            return status_response(StatusCode::InternalError, &[]);
+        }
+        clear_secret_array(&mut wrapping_key);
+        clear_bytes(inner.as_mut_slice());
+        self.record_audit_event(
+            AuditEventClass::Administrative,
+            AuditEventCode::CommandCompleted,
+            AuditResultClass::Success,
+            &[frame.code, request.target_key_id, request.wrapping_key_id],
+        );
+        match encode_wrapped_key_export_payload(envelope.as_slice()) {
+            Some(payload) => status_response(StatusCode::Success, &payload),
+            None => status_response(StatusCode::InternalError, &[]),
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        clippy::single_match_else,
+        clippy::manual_let_else,
+        clippy::ignored_unit_patterns
+    )]
+    fn handle_derive_shared_secret(&mut self, frame: &ProtocolFrame) -> ProtocolFrame {
+        let (_, mut inner) = match self.authorize_privileged_owned::<78>(
+            AuthorityRole::KeyManager,
+            frame.payload.as_slice(),
+            0,
+            69,
+        ) {
+            Ok(values) => values,
+            Err(status) => return status_response(status, &[]),
+        };
+        if inner.is_empty() {
+            clear_bytes(inner.as_mut_slice());
+            return status_response(StatusCode::CommandError, &[]);
+        }
+        let request = match decode_derive_request(inner.as_slice()) {
+            Ok(request) => request,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let metadata = match self.key_store.get_key_metadata(request.key_id) {
+            Ok(view) => view,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let key_policy = evaluate_key_policy(
+            &metadata,
+            Some(request.algorithm),
+            USAGE_DERIVE,
+            false,
+            &[KeyLifecycleState::Active],
+        );
+        if !key_policy.decision {
+            clear_bytes(inner.as_mut_slice());
+            return policy_status_response(
+                status_for_denial_class(key_policy.denial_class),
+                key_policy.denial_class,
+                None,
+            );
+        }
+        let mut key_bytes = match self
+            .key_store
+            .export_key_material_for_operation(request.key_id, request.algorithm, USAGE_DERIVE, false)
+        {
+            Ok(material) => material,
+            Err(status) => {
+                clear_bytes(inner.as_mut_slice());
+                return status_response(status, &[]);
+            }
+        };
+        let derived = match request.algorithm {
+            KeyAlgorithm::P256EcdhHkdfSha256 => {
+                let secret = match P256SecretKey::from_slice(&key_bytes) {
+                    Ok(secret) => secret,
+                    Err(_) => {
+                        clear_secret_array(&mut key_bytes);
+                        clear_bytes(inner.as_mut_slice());
+                        return status_response(StatusCode::InternalError, &[]);
+                    }
+                };
+                let peer = match P256PublicKey::from_sec1_bytes(request.peer_public_material.as_slice()) {
+                    Ok(peer) => peer,
+                    Err(_) => {
+                        clear_secret_array(&mut key_bytes);
+                        clear_bytes(inner.as_mut_slice());
+                        return status_response(StatusCode::ValidationError, &[]);
+                    }
+                };
+                let shared_secret = diffie_hellman(secret.to_nonzero_scalar(), peer.as_affine());
+                let mut info = Vec::<u8, 64>::new();
+                if info.extend_from_slice(DERIVE_INFO_PREFIX).is_err()
+                    || info.extend_from_slice(request.context.as_slice()).is_err()
+                {
+                    clear_secret_array(&mut key_bytes);
+                    clear_bytes(inner.as_mut_slice());
+                    return status_response(StatusCode::InternalError, &[]);
+                }
+                let hk = Hkdf::<Sha256>::new(None, shared_secret.raw_secret_bytes().as_slice());
+                let mut output = [0u8; super::state::MAX_DERIVED_OUTPUT_LEN];
+                if hk
+                    .expand(info.as_slice(), &mut output[..usize::from(request.requested_len)])
+                    .is_err()
+                {
+                    clear_secret_array(&mut key_bytes);
+                    clear_secret_array(&mut output);
+                    clear_bytes(inner.as_mut_slice());
+                    return status_response(StatusCode::InternalError, &[]);
+                }
+                let result = Vec::<u8, { super::state::MAX_DERIVED_OUTPUT_LEN }>::from_slice(
+                    &output[..usize::from(request.requested_len)],
+                );
+                clear_secret_array(&mut output);
+                match result {
+                    Ok(result) => result,
+                    Err(_) => {
+                        clear_secret_array(&mut key_bytes);
+                        clear_bytes(inner.as_mut_slice());
+                        return status_response(StatusCode::InternalError, &[]);
+                    }
+                }
+            }
+            _ => {
+                clear_secret_array(&mut key_bytes);
+                clear_bytes(inner.as_mut_slice());
+                return status_response(StatusCode::AuthorizationError, &[]);
+            }
+        };
+        clear_secret_array(&mut key_bytes);
+        clear_bytes(inner.as_mut_slice());
+        self.record_audit_event(
+            AuditEventClass::Administrative,
+            AuditEventCode::CommandCompleted,
+            AuditResultClass::Success,
+            &[frame.code, request.key_id, request.requested_len],
+        );
+        match encode_derive_response_payload(derived.as_slice()) {
+            Some(payload) => status_response(StatusCode::Success, &payload),
+            None => status_response(StatusCode::InternalError, &[]),
         }
     }
 

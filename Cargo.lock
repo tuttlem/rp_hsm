@@ -426,6 +426,7 @@ dependencies = [
  "ff",
  "generic-array",
  "group",
+ "hkdf",
  "rand_core 0.6.4",
  "sec1",
  "subtle",
@@ -687,9 +688,13 @@ version = "0.1.0"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
+ "hkdf",
+ "hmac",
+ "p256",
  "rp_hsm",
  "serialport",
  "sha2",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -1304,6 +1309,7 @@ dependencies = [
  "ed25519-dalek",
  "heapless",
  "hkdf",
+ "hmac",
  "p256",
  "rand_chacha",
  "rand_core 0.6.4",

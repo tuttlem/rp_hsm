@@ -1,13 +1,21 @@
+use std::fs::File;
+use std::io::Read;
 use std::thread;
 use std::time::Duration;
 
+use chacha20poly1305::{
+    ChaCha20Poly1305, KeyInit,
+    aead::{AeadInPlace, generic_array::GenericArray},
+};
 use ed25519_dalek::Signer;
+use hkdf::Hkdf;
 use protocol::protocol::{
     HEADER_LEN, MessageKind, PROTOCOL_VERSION, ProtocolFrame, StatusCode,
     decode_frame, developer_reset_marker, encode_frame, finalize_marker, reactivate_marker,
     recovery_marker, revoke_marker, unlock_marker, zeroize_marker,
 };
 use sha2::{Digest, Sha256};
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
 
 use crate::cli::output::{CliError, TransportCondition};
 
@@ -16,6 +24,7 @@ const FLASH_SETTLE_MS: u64 = 200;
 const READ_RETRY_ATTEMPTS: usize = 60;
 const READ_RETRY_DELAY_MS: u64 = 150;
 const UPDATE_TRUST_ANCHOR_SEED: [u8; 32] = *b"rp_hsm_update_anchor_seed_v1____";
+const ASYMMETRIC_ENCRYPT_INFO: &[u8] = b"rp_hsm.asym_encrypt.v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -244,6 +253,8 @@ pub enum ManagedAlgorithm {
     ChaCha20Poly1305 = 0x03,
     Aes256Gcm = 0x04,
     X25519ChaCha20Poly1305 = 0x05,
+    HmacSha256 = 0x06,
+    P256EcdhHkdfSha256 = 0x07,
 }
 
 impl ManagedAlgorithm {
@@ -259,7 +270,28 @@ impl ManagedAlgorithm {
             "x25519-chacha20poly1305" | "x25519chacha20poly1305" => {
                 Ok(Self::X25519ChaCha20Poly1305)
             }
+            "hmac-sha256" | "hmacsha256" => Ok(Self::HmacSha256),
+            "p256-ecdh-hkdf-sha256" | "p256ecdhhkdfsha256" => Ok(Self::P256EcdhHkdfSha256),
             _ => Err(CliError::usage("invalid algorithm value")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManagedExportPolicy {
+    NonExportable = 0x01,
+    WrappedOnly = 0x02,
+}
+
+impl ManagedExportPolicy {
+    /// # Errors
+    ///
+    /// Returns `CliError` when the provided policy name is unsupported.
+    pub fn parse(value: &str) -> Result<Self, CliError> {
+        match value {
+            "non-exportable" | "nonexportable" => Ok(Self::NonExportable),
+            "wrapped-only" | "wrappedonly" => Ok(Self::WrappedOnly),
+            _ => Err(CliError::usage("invalid export policy value")),
         }
     }
 }
@@ -267,7 +299,7 @@ impl ManagedAlgorithm {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AlgorithmProfileRecord {
     pub algorithm: u8,
-    pub operation_mask: u8,
+    pub operation_mask: u16,
     pub public_material_len: u8,
 }
 
@@ -277,6 +309,11 @@ pub struct GenerateKeyResult {
     pub lifecycle_state: u8,
     pub record_revision: u32,
     pub store_revision: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WrappedKeyExport {
+    pub envelope: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -707,6 +744,7 @@ impl SerialBackend {
         proof: &[u8],
         algorithm: ManagedAlgorithm,
         usage_mask: u8,
+        export_policy: ManagedExportPolicy,
     ) -> Result<GenerateKeyResult, CliError> {
         let mut port = open_port(&self.config)?;
         let mut session = authenticate_on_port(&mut *port, Role::KeyManager, proof)?;
@@ -715,7 +753,7 @@ impl SerialBackend {
             &mut session,
             0xa0,
             0x02,
-            &[algorithm as u8, usage_mask],
+            &[algorithm as u8, usage_mask, export_policy as u8],
         )?;
         ensure_status(&response, StatusCode::Success)?;
         let payload = copy_array::<10>(response.payload.as_slice())?;
@@ -770,7 +808,10 @@ impl SerialBackend {
         let expected_nonce_len = match algorithm {
             ManagedAlgorithm::ChaCha20Poly1305 | ManagedAlgorithm::Aes256Gcm => 12,
             ManagedAlgorithm::X25519ChaCha20Poly1305 => 44,
-            ManagedAlgorithm::Ed25519 | ManagedAlgorithm::P256 => {
+            ManagedAlgorithm::Ed25519
+            | ManagedAlgorithm::P256
+            | ManagedAlgorithm::HmacSha256
+            | ManagedAlgorithm::P256EcdhHkdfSha256 => {
                 return Err(CliError::usage("invalid algorithm for decrypt"));
             }
         };
@@ -816,6 +857,57 @@ impl SerialBackend {
             ));
         }
         self.sym_encrypt(proof, key_id, algorithm, plaintext)
+    }
+
+    /// # Errors
+    ///
+    /// Returns `CliError` when the supported sender-side helper is used with
+    /// malformed public material or plaintext.
+    pub fn sender_encrypt_to_public(
+        &self,
+        algorithm: ManagedAlgorithm,
+        public_key: &[u8],
+        plaintext: &[u8],
+    ) -> Result<EncryptResult, CliError> {
+        if algorithm != ManagedAlgorithm::X25519ChaCha20Poly1305 {
+            return Err(CliError::usage(
+                "invalid algorithm for sender-side asymmetric encryption",
+            ));
+        }
+        if public_key.len() != 32 {
+            return Err(CliError::usage("public key must be exactly 32 bytes"));
+        }
+        if plaintext.is_empty() || plaintext.len() > 128 {
+            return Err(CliError::usage("plaintext must be between 1 and 128 bytes"));
+        }
+        let mut ephemeral_seed = [0u8; 32];
+        fill_os_random(&mut ephemeral_seed)?;
+        let ephemeral_secret = X25519StaticSecret::from(ephemeral_seed);
+        let ephemeral_public = X25519PublicKey::from(&ephemeral_secret);
+        let recipient_public = X25519PublicKey::from(
+            <[u8; 32]>::try_from(public_key)
+                .map_err(|_| CliError::usage("public key must be exactly 32 bytes"))?,
+        );
+        let shared_secret = ephemeral_secret.diffie_hellman(&recipient_public);
+        let hk = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
+        let mut derived_key = [0u8; 32];
+        hk.expand(ASYMMETRIC_ENCRYPT_INFO, &mut derived_key)
+            .map_err(|_| CliError::invalid_response("failed to derive sender envelope key"))?;
+        let mut nonce = [0u8; 12];
+        fill_os_random(&mut nonce)?;
+        let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&derived_key));
+        let mut ciphertext = plaintext.to_vec();
+        let tag = cipher
+            .encrypt_in_place_detached(GenericArray::from_slice(&nonce), b"", &mut ciphertext)
+            .map_err(|_| CliError::invalid_response("failed to encrypt sender envelope"))?;
+        ciphertext.extend_from_slice(tag.as_slice());
+        let mut envelope_header = Vec::with_capacity(44);
+        envelope_header.extend_from_slice(ephemeral_public.as_bytes());
+        envelope_header.extend_from_slice(&nonce);
+        Ok(EncryptResult {
+            nonce: envelope_header,
+            ciphertext,
+        })
     }
 
     /// # Errors
@@ -1074,6 +1166,35 @@ impl SerialBackend {
 
     /// # Errors
     ///
+    /// Returns `CliError` when key-manager authentication or wrapped export fails.
+    pub fn export_wrapped_key(
+        &self,
+        proof: &[u8],
+        wrapping_key_id: u8,
+        target_key_id: u8,
+    ) -> Result<Vec<u8>, CliError> {
+        let mut port = open_port(&self.config)?;
+        let mut session = authenticate_on_port(&mut *port, Role::KeyManager, proof)?;
+        let response = exchange_authorized(
+            &mut *port,
+            &mut session,
+            0x93,
+            0x02,
+            &[wrapping_key_id, target_key_id],
+        )?;
+        ensure_status(&response, StatusCode::Success)?;
+        if response.payload.len() < 2 {
+            return Err(CliError::invalid_response("wrapped export payload is truncated"));
+        }
+        let envelope_len = usize::from(u16::from_le_bytes([response.payload[0], response.payload[1]]));
+        if response.payload.len() != 2 + envelope_len {
+            return Err(CliError::invalid_response("wrapped export payload length is invalid"));
+        }
+        Ok(response.payload[2..].to_vec())
+    }
+
+    /// # Errors
+    ///
     /// Returns `CliError` when detached verification fails structurally.
     pub fn verify_detached(
         &self,
@@ -1113,6 +1234,122 @@ impl SerialBackend {
             [0x01] => Ok(true),
             _ => Err(CliError::invalid_response("unexpected verify payload")),
         }
+    }
+
+    /// # Errors
+    ///
+    /// Returns `CliError` when key-manager authentication or MAC generation fails.
+    pub fn generate_mac(&self, key_id: u8, proof: &[u8], message: &[u8]) -> Result<Vec<u8>, CliError> {
+        if message.is_empty() || message.len() > 128 {
+            return Err(CliError::usage("message must be between 1 and 128 bytes"));
+        }
+        let mut port = open_port(&self.config)?;
+        let mut session = authenticate_on_port(&mut *port, Role::KeyManager, proof)?;
+        let mut inner = Vec::with_capacity(4 + message.len());
+        inner.push(key_id);
+        inner.push(ManagedAlgorithm::HmacSha256 as u8);
+        inner.extend_from_slice(
+            &u16::try_from(message.len())
+                .map_err(|_| CliError::usage("message is too large"))?
+                .to_le_bytes(),
+        );
+        inner.extend_from_slice(message);
+        let response = exchange_authorized(&mut *port, &mut session, 0xa1, 0x02, &inner)?;
+        ensure_status(&response, StatusCode::Success)?;
+        let Some(&mac_len_u8) = response.payload.first() else {
+            return Err(CliError::invalid_response("missing MAC length"));
+        };
+        let mac_len = usize::from(mac_len_u8);
+        if response.payload.len() != 1 + mac_len {
+            return Err(CliError::invalid_response("unexpected MAC payload length"));
+        }
+        Ok(response.payload[1..].to_vec())
+    }
+
+    /// # Errors
+    ///
+    /// Returns `CliError` when key-manager authentication or MAC verification fails structurally.
+    pub fn verify_mac(
+        &self,
+        key_id: u8,
+        proof: &[u8],
+        message: &[u8],
+        mac: &[u8],
+    ) -> Result<bool, CliError> {
+        if message.is_empty() || message.len() > 128 {
+            return Err(CliError::usage("message must be between 1 and 128 bytes"));
+        }
+        if mac.is_empty() || mac.len() > 32 {
+            return Err(CliError::usage("MAC must be between 1 and 32 bytes"));
+        }
+        let mut port = open_port(&self.config)?;
+        let mut session = authenticate_on_port(&mut *port, Role::KeyManager, proof)?;
+        let mut inner = Vec::with_capacity(5 + message.len() + mac.len());
+        inner.push(key_id);
+        inner.push(ManagedAlgorithm::HmacSha256 as u8);
+        inner.extend_from_slice(
+            &u16::try_from(message.len())
+                .map_err(|_| CliError::usage("message is too large"))?
+                .to_le_bytes(),
+        );
+        inner.extend_from_slice(message);
+        inner.push(u8::try_from(mac.len()).map_err(|_| CliError::usage("MAC is too large"))?);
+        inner.extend_from_slice(mac);
+        let response = exchange_authorized(&mut *port, &mut session, 0xa2, 0x02, &inner)?;
+        ensure_status(&response, StatusCode::Success)?;
+        match response.payload.as_slice() {
+            [0x00] => Ok(false),
+            [0x01] => Ok(true),
+            _ => Err(CliError::invalid_response("unexpected verify-mac payload")),
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Returns `CliError` when managed derive fails.
+    pub fn derive_shared_secret(
+        &self,
+        proof: &[u8],
+        key_id: u8,
+        algorithm: ManagedAlgorithm,
+        peer_public: &[u8],
+        context: &[u8],
+        requested_len: u8,
+    ) -> Result<Vec<u8>, CliError> {
+        if algorithm != ManagedAlgorithm::P256EcdhHkdfSha256 {
+            return Err(CliError::usage("invalid algorithm for derive"));
+        }
+        if peer_public.is_empty() || peer_public.len() > 33 {
+            return Err(CliError::usage("peer public key must be between 1 and 33 bytes"));
+        }
+        if context.len() > 32 {
+            return Err(CliError::usage("derive context must be at most 32 bytes"));
+        }
+        if requested_len == 0 || requested_len > 32 {
+            return Err(CliError::usage("derive output must be between 1 and 32 bytes"));
+        }
+        let mut port = open_port(&self.config)?;
+        let mut session = authenticate_on_port(&mut *port, Role::KeyManager, proof)?;
+        let mut inner = Vec::with_capacity(5 + peer_public.len() + context.len());
+        inner.push(key_id);
+        inner.push(algorithm as u8);
+        inner.push(
+            u8::try_from(peer_public.len()).map_err(|_| CliError::usage("peer public key is too large"))?,
+        );
+        inner.extend_from_slice(peer_public);
+        inner.push(u8::try_from(context.len()).map_err(|_| CliError::usage("context is too large"))?);
+        inner.extend_from_slice(context);
+        inner.push(requested_len);
+        let response = exchange_authorized(&mut *port, &mut session, 0x96, 0x02, &inner)?;
+        ensure_status(&response, StatusCode::Success)?;
+        let Some(&len_u8) = response.payload.first() else {
+            return Err(CliError::invalid_response("missing derive output length"));
+        };
+        let output_len = usize::from(len_u8);
+        if response.payload.len() != 1 + output_len {
+            return Err(CliError::invalid_response("unexpected derive output length"));
+        }
+        Ok(response.payload[1..].to_vec())
     }
 
     /// # Errors
@@ -1471,20 +1708,27 @@ fn decode_algorithm_profiles(payload: &[u8]) -> Result<Vec<AlgorithmProfileRecor
     let Some(&count) = payload.first() else {
         return Err(CliError::invalid_response("missing algorithm count"));
     };
-    let expected_len = 1 + usize::from(count) * 3;
+    let expected_len = 1 + usize::from(count) * 4;
     if payload.len() != expected_len {
         return Err(CliError::invalid_response("unexpected algorithm profile length"));
     }
     let mut profiles = Vec::new();
     for idx in 0..usize::from(count) {
-        let start = 1 + idx * 3;
+        let start = 1 + idx * 4;
         profiles.push(AlgorithmProfileRecord {
             algorithm: payload[start],
-            operation_mask: payload[start + 1],
-            public_material_len: payload[start + 2],
+            operation_mask: u16::from_le_bytes([payload[start + 1], payload[start + 2]]),
+            public_material_len: payload[start + 3],
         });
     }
     Ok(profiles)
+}
+
+fn fill_os_random(buffer: &mut [u8]) -> Result<(), CliError> {
+    let mut file = File::open("/dev/urandom")
+        .map_err(|err| CliError::transport(format!("failed to open /dev/urandom: {err}")))?;
+    file.read_exact(buffer)
+        .map_err(|err| CliError::transport(format!("failed to read /dev/urandom: {err}")))
 }
 
 fn decode_key_metadata(payload: &[u8]) -> Result<KeyMetadataRecord, CliError> {

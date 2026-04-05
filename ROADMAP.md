@@ -121,12 +121,15 @@ Only add crypto operations after the key model exists.
 
 - Add signing operations.
 - Add verification operations.
-- Add encryption and decryption only if they are truly in scope.
-- Add key agreement only if it is truly in scope.
+- Add symmetric encryption and decryption for managed keys.
+- Add asymmetric recipient encryption and managed asymmetric decryption where it
+  supports real deployment workflows.
+- Add key agreement where it supports envelope construction, provisioning, or
+  application integration.
 - Add a random number service.
 - Add wrapped key import and export services where policy permits them.
-- Add hash, HMAC, or KDF services only when they support real product use
-  cases.
+- Add hash, HMAC, and KDF services where they support real product use cases
+  such as authentication, key wrapping, derivation, and interoperability.
 
 Planned operation progression after `005-core-crypto-operations`:
 
@@ -135,28 +138,63 @@ Planned operation progression after `005-core-crypto-operations`:
   - public detached verification for `Ed25519` and `P-256`
   - bounded random-byte generation
   - wrapped key import only
-- Post-`005` first-tier additions should focus on architecture-bearing services:
-  - `AES-256-GCM`
-  - `ChaCha20-Poly1305`
-  - `HKDF-SHA-256`
-  - `ECDSA P-256` signing
-  - `X25519` asymmetric recipient encryption
-  - `ECDH P-256`
-- Post-`005` second-tier additions are acceptable only after policy, audit, and
-  operator tooling are mature enough to support them safely:
-  - `HMAC-SHA-256`
+- The repo now includes first-generation managed symmetric and asymmetric
+  encryption flows in addition to the original signing/random/update surface:
+  - managed `ChaCha20-Poly1305` symmetric encrypt/decrypt
+  - managed `AES-256-GCM` symmetric encrypt/decrypt
+  - generated `Ed25519` signing keys
+  - generated `P-256` signing keys
+  - `X25519` recipient encryption with managed decrypt keys
+  - sender-side interoperability helper for `x25519-chacha20poly1305`
+  - managed `HMAC-SHA-256`
+  - managed `P-256 ECDH + HKDF-SHA-256`
+  - policy-bound wrapped export for wrapped-only key classes
+- Next-tier additions should widen operator choice without weakening policy or
+  making the CLI incoherent:
   - `SHA-256`
   - AES key wrap
-  - AES-CMAC
+  - `ECDSA P-256` signing
+  - `ECDH P-256`
+  - `X25519` shared-secret derivation
+- Broader suite additions are desirable once the product definition, packaging,
+  and operator UX are stable enough to carry them responsibly:
+  - `HMAC-SHA-384`
   - `SHA-384`
+  - `SHA-512`
+  - `HKDF-SHA-384`
+  - AES key wrap with padding
+  - AES-CMAC
   - `ECDSA P-384`
-  - `Ed25519` public-key verification and compatibility extensions beyond the
-    initial signing path
+  - `ECDH P-384`
+  - `Ed25519` compatibility and public-key verification extensions beyond the
+    initial path
+  - `X448` or other larger-curve asymmetric options only if they address a
+    clear interoperability requirement
+  - RSA OAEP / RSA signing only if a later product target explicitly requires
+    legacy PKI interoperability
 - Explicitly excluded from near-term scope unless a later spec justifies them:
-  - plaintext key export
-  - general-purpose decrypt/encrypt helpers without a clear custody use case
-  - RSA key management and RSA signing
+  - plaintext private-key export
+  - unauthenticated general-purpose crypto helper commands
+  - algorithm sprawl without matching policy, audit, and tooling support
   - password-oriented services such as `PBKDF2`
+  - “support everything” claims without bounded operator workflows
+- When broadening the suite, prefer adding complete user stories instead of
+  isolated primitives. For example:
+  - recipient encryption should include sender-side envelope guidance
+  - signing should include public-material retrieval and verify workflows
+  - key agreement should include a documented downstream use such as KDF or
+    envelope construction
+  - MAC and KDF services should be tied to an operator or integration use case
+- The long-term target suite can therefore grow toward:
+  - managed symmetric AEAD: `AES-256-GCM`, `ChaCha20-Poly1305`
+  - MAC: `HMAC-SHA-256`, `HMAC-SHA-384`, `AES-CMAC`
+  - hash: `SHA-256`, `SHA-384`, `SHA-512`
+  - KDF: `HKDF-SHA-256`, `HKDF-SHA-384`
+  - signing: `Ed25519`, `ECDSA P-256`, `ECDSA P-384`
+  - recipient encryption: `X25519-ChaCha20-Poly1305`, later `P-256`-based
+    envelope profiles if justified
+  - key agreement: `X25519`, `ECDH P-256`, `ECDH P-384`
+  - key wrapping: AES key wrap and policy-bound wrapped export/import
 
 Exit criteria:
 

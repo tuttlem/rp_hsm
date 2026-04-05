@@ -248,12 +248,20 @@ cargo rphsmtool generate-key --device /dev/ttyACM0 --algorithm aes256gcm --usage
 cargo rphsmtool generate-key --device /dev/ttyACM0 --algorithm ed25519 --usage sign --role key-manager --proof-env RPHSM_PROOF
 cargo rphsmtool generate-key --device /dev/ttyACM0 --algorithm p256 --usage sign --role key-manager --proof-env RPHSM_PROOF
 cargo rphsmtool generate-key --device /dev/ttyACM0 --algorithm x25519-chacha20poly1305 --usage encrypt,decrypt --role key-manager --proof-env RPHSM_PROOF
+cargo rphsmtool generate-key --device /dev/ttyACM0 --algorithm hmac-sha256 --usage mac --role key-manager --proof-env RPHSM_PROOF
+cargo rphsmtool generate-key --device /dev/ttyACM0 --algorithm p256-ecdh-hkdf-sha256 --usage derive --role key-manager --proof-env RPHSM_PROOF
+cargo rphsmtool generate-key --device /dev/ttyACM0 --algorithm chacha20poly1305 --usage encrypt,decrypt --export-policy wrapped-only --role key-manager --proof-env RPHSM_PROOF
 cargo rphsmtool sym-encrypt --device /dev/ttyACM0 --key-id <RETURNED KEY_ID> --algorithm chacha20poly1305 --role key-manager --proof-env RPHSM_PROOF < plaintext.bin > ciphertext.bin
 cargo rphsmtool sym-decrypt --device /dev/ttyACM0 --key-id <RETURNED KEY_ID> --algorithm chacha20poly1305 --role key-manager --proof-env RPHSM_PROOF < ciphertext.bin > plaintext.out
 cargo rphsmtool sym-encrypt --device /dev/ttyACM0 --key-id <RETURNED KEY_ID> --algorithm aes256gcm --role key-manager --proof-env RPHSM_PROOF < plaintext.bin > ciphertext.bin
 cargo rphsmtool sym-decrypt --device /dev/ttyACM0 --key-id <RETURNED KEY_ID> --algorithm aes256gcm --role key-manager --proof-env RPHSM_PROOF < ciphertext.bin > plaintext.out
+cargo rphsmtool sender-encrypt --algorithm x25519-chacha20poly1305 --public-key-hex <PUBLIC_MATERIAL_HEX> < plaintext.bin > asym-cipher.bin
 cargo rphsmtool asym-encrypt --device /dev/ttyACM0 --key-id <RETURNED KEY_ID> --algorithm x25519-chacha20poly1305 --role key-manager --proof-env RPHSM_PROOF < plaintext.bin > asym-cipher.bin
 cargo rphsmtool asym-decrypt --device /dev/ttyACM0 --key-id <RETURNED KEY_ID> --algorithm x25519-chacha20poly1305 --role key-manager --proof-env RPHSM_PROOF < asym-cipher.bin > plaintext.out
+cargo rphsmtool mac --device /dev/ttyACM0 --key-id <RETURNED KEY_ID> --role key-manager --proof-env RPHSM_PROOF < message.bin > mac.bin
+cargo rphsmtool verify-mac --device /dev/ttyACM0 --key-id <RETURNED KEY_ID> --mac-hex <MAC_HEX> --role key-manager --proof-env RPHSM_PROOF < message.bin
+cargo rphsmtool derive --device /dev/ttyACM0 --key-id <RETURNED KEY_ID> --algorithm p256-ecdh-hkdf-sha256 --peer-public-key-hex <PEER_PUBLIC_KEY_HEX> [--context-hex <HEX>] --bytes 32 --role key-manager --proof-env RPHSM_PROOF > derived.bin
+cargo rphsmtool export-wrapped-key --device /dev/ttyACM0 --key-id <EXPORTABLE_KEY_ID> --wrapping-key-id <WRAPPING_KEY_ID> --role key-manager --proof-env RPHSM_PROOF > envelope.bin
 cargo rphsmtool get-audit-page --device /dev/ttyACM0 --start-sequence 0 --max-events 4 --role administrator --proof-env RPHSM_PROOF
 cargo rphsmtool update-status --device /dev/ttyACM0 --role administrator --proof-env RPHSM_PROOF
 cargo rphsmtool apply-update --device /dev/ttyACM0 --image update.bin --version 1.0.0.1 --role administrator --proof-env RPHSM_PROOF
@@ -273,6 +281,10 @@ cargo rphsmtool destroy-key --device /dev/ttyACM0 --key-id 1 --role key-manager 
 For key-generation workflows, use the `key_id` returned by `generate-key`
 rather than assuming fixed ids. The quickstarts use `<RETURNED KEY_ID>` for the
 same reason.
+
+Public material for generated recipient and derivation keys is available
+through `get-key-metadata`. Private material remains on-device and is never
+rendered through the CLI.
 
 Future feature work should update the release evidence set when it changes:
 
@@ -297,18 +309,29 @@ Behavior:
   state.
 - `list-algorithms` exposes the supported managed algorithm set without
   requiring privileged session setup.
-- `asym-encrypt` and `asym-decrypt` use the first shipping recipient profile,
-  `x25519-chacha20poly1305`, and operate on the managed recipient `key_id`
-  returned by `generate-key`.
+- `sender-encrypt`, `asym-encrypt`, and `asym-decrypt` use the first shipping
+  recipient profile, `x25519-chacha20poly1305`. `sender-encrypt` is the
+  supported external-sender helper that consumes exported `public_material`
+  rather than a managed key id.
 - `auth-check` verifies that a reviewed role can authenticate successfully
   without requiring users to construct protocol frames manually.
 - `lock`, `unlock`, `zeroize`, `logout`, recovery transitions, `sign`,
   `verify`, `import-wrapped-key`, `revoke-key`, and `destroy-key` all map to
   already-implemented firmware operations.
 - `generate-key` creates persistent managed keys for `chacha20poly1305`,
-  `aes256gcm`, `ed25519`, and `p256` with explicit usage policy.
+  `aes256gcm`, `ed25519`, `p256`, `x25519-chacha20poly1305`,
+  `hmac-sha256`, and `p256-ecdh-hkdf-sha256` with explicit usage policy and,
+  where allowed, explicit wrapped-export policy.
 - `sym-encrypt` and `sym-decrypt` are supported for `chacha20poly1305` and
   `aes256gcm` and read/write raw bytes via stdin/stdout.
+- `mac` writes raw HMAC bytes to stdout and `verify-mac` writes `true` or
+  `false` to stdout.
+- `derive` writes raw derived bytes to stdout for
+  `p256-ecdh-hkdf-sha256`.
+- `export-wrapped-key` returns wrapped material only. A key must be generated
+  with `--export-policy wrapped-only` before export is allowed, and the
+  imported copy is restored as non-exportable so wrapped export does not become
+  an unlimited re-export loop.
 - If `--device` is omitted, `rphsmtool` auto-selects only when exactly one
   compatible device is present.
 - If multiple compatible devices are present, the command fails closed and

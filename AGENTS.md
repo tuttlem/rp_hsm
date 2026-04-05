@@ -26,6 +26,8 @@ Auto-generated from all feature plans. Last updated: 2026-04-05
 - Rust 2024 + `rp235x-hal`, `heapless`, `serialport`, `ed25519-dalek`, `chacha20poly1305`, `sha2`, `rand_core`, `rand_chacha` (015-basic-hsm-ops)
 - RP2350 flash-backed persistent state and key metadata snapshots (015-basic-hsm-ops)
 - Rust 2024 + `rp235x-hal`, `heapless`, `serialport`, `p256`, `chacha20poly1305`, `sha2`, plus planned `x25519-dalek` and `hkdf` for the first shipping asymmetric-encryption profile (016-asymmetric-encryption)
+- Rust 2024 + `rp235x-hal`, `heapless`, `serialport`, `p256`, `x25519-dalek`, `hkdf`, `sha2`, `chacha20poly1305`, `aes-gcm`, plus reviewed MAC/key-wrap crates if selected during implementation (017-crypto-suite-expansion)
+- RP2350 flash-backed persistent key metadata, policy profile, audit journal, firmware update metadata, and key-store records (017-crypto-suite-expansion)
 
 - Rust edition 2024 (`no_std`) + `rp235x-hal`, `embedded-hal`, `heapless`, `critical-section`; existing USB support remains transport scaffolding only (001-secure-command-protocol)
 
@@ -45,9 +47,9 @@ cargo test [ONLY COMMANDS FOR ACTIVE TECHNOLOGIES][ONLY COMMANDS FOR ACTIVE TECH
 Rust edition 2024 (`no_std`): Follow standard conventions
 
 ## Recent Changes
+- 017-crypto-suite-expansion: Added Rust 2024 + `rp235x-hal`, `heapless`, `serialport`, `p256`, `x25519-dalek`, `hkdf`, `sha2`, `chacha20poly1305`, `aes-gcm`, plus reviewed MAC/key-wrap crates if selected during implementation
 - 016-asymmetric-encryption: Added Rust 2024 + `rp235x-hal`, `heapless`, `serialport`, `p256`, `chacha20poly1305`, `sha2`, plus planned `x25519-dalek` and `hkdf` for the first shipping asymmetric-encryption profile
 - 015-basic-hsm-ops: Added Rust 2024 + `rp235x-hal`, `heapless`, `serialport`, `ed25519-dalek`, `chacha20poly1305`, `sha2`, `rand_core`, `rand_chacha`
-- 010-hardening-release-process: Added Markdown documentation plus workspace command execution in + existing Cargo workspace commands (`cargo test`,
 
 
 <!-- MANUAL ADDITIONS START -->

@@ -25,6 +25,10 @@ pub const P256_PUBLIC_KEY_LEN: usize = 33;
 pub const P256_SIGNATURE_LEN: usize = 64;
 pub const X25519_PUBLIC_KEY_LEN: usize = 32;
 pub const MAX_PUBLIC_MATERIAL_LEN: usize = P256_PUBLIC_KEY_LEN;
+pub const HMAC_SHA256_LEN: usize = 32;
+pub const MAX_MAC_LEN: usize = HMAC_SHA256_LEN;
+pub const MAX_DERIVE_CONTEXT_LEN: usize = 32;
+pub const MAX_DERIVED_OUTPUT_LEN: usize = 32;
 pub const CHACHA20POLY1305_KEY_LEN: usize = 32;
 pub const CHACHA20POLY1305_NONCE_LEN: usize = 12;
 pub const CHACHA20POLY1305_TAG_LEN: usize = 16;
@@ -45,6 +49,7 @@ pub const SERVICE_FLAG_WRAPPED_IMPORT: u8 = 0x08;
 pub const SERVICE_FLAG_KEY_GENERATION: u8 = 0x10;
 pub const SERVICE_FLAG_ENCRYPT: u8 = 0x20;
 pub const SERVICE_FLAG_DECRYPT: u8 = 0x40;
+pub const SERVICE_FLAG_MAC: u8 = 0x80;
 pub const SIGNATURE_ALGORITHM_FLAGS: u8 = 0x01;
 pub const VERIFY_ALGORITHM_FLAGS: u8 = 0x03;
 pub const ENCRYPT_ALGORITHM_FLAGS: u8 = 0x07;
@@ -52,7 +57,9 @@ pub const USAGE_SIGN: u8 = 0x01;
 pub const USAGE_VERIFY: u8 = 0x02;
 pub const USAGE_ENCRYPT: u8 = 0x04;
 pub const USAGE_DECRYPT: u8 = 0x08;
+pub const USAGE_DERIVE: u8 = 0x10;
 pub const USAGE_WRAP_IMPORT: u8 = 0x20;
+pub const USAGE_MAC: u8 = 0x40;
 pub const POLICY_PROFILE_VERSION: u8 = 1;
 pub const PROTECTED_ACTION_EXECUTE_ZEROIZE: u16 = 0x0001;
 pub const PROTECTED_ACTION_DESTROY_KEY: u16 = 0x0002;
@@ -1087,6 +1094,8 @@ pub enum KeyAlgorithm {
     ChaCha20Poly1305 = 0x03,
     Aes256Gcm = 0x04,
     X25519ChaCha20Poly1305 = 0x05,
+    HmacSha256 = 0x06,
+    P256EcdhHkdfSha256 = 0x07,
 }
 
 impl KeyAlgorithm {
@@ -1098,6 +1107,8 @@ impl KeyAlgorithm {
             0x03 => Some(Self::ChaCha20Poly1305),
             0x04 => Some(Self::Aes256Gcm),
             0x05 => Some(Self::X25519ChaCha20Poly1305),
+            0x06 => Some(Self::HmacSha256),
+            0x07 => Some(Self::P256EcdhHkdfSha256),
             _ => None,
         }
     }
@@ -1403,6 +1414,7 @@ pub struct SignRequest {
 pub struct GenerateKeyRequest {
     pub algorithm: KeyAlgorithm,
     pub usage_mask: u8,
+    pub export_policy: ExportPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1411,6 +1423,21 @@ pub struct VerifyRequest {
     pub message: Vec<u8, MAX_CRYPTO_MESSAGE_LEN>,
     pub public_key: Vec<u8, P256_PUBLIC_KEY_LEN>,
     pub signature: Vec<u8, MAX_SIGNATURE_LEN>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MacRequest {
+    pub key_id: u8,
+    pub algorithm: KeyAlgorithm,
+    pub message: Vec<u8, MAX_CRYPTO_MESSAGE_LEN>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifyMacRequest {
+    pub key_id: u8,
+    pub algorithm: KeyAlgorithm,
+    pub message: Vec<u8, MAX_CRYPTO_MESSAGE_LEN>,
+    pub mac: Vec<u8, MAX_MAC_LEN>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1444,20 +1471,33 @@ pub struct DecryptResponse {
     pub plaintext: Vec<u8, MAX_CRYPTO_MESSAGE_LEN>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeriveRequest {
+    pub key_id: u8,
+    pub algorithm: KeyAlgorithm,
+    pub peer_public_material: Vec<u8, P256_PUBLIC_KEY_LEN>,
+    pub context: Vec<u8, MAX_DERIVE_CONTEXT_LEN>,
+    pub requested_len: u8,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AlgorithmProfile {
     pub algorithm: KeyAlgorithm,
-    pub operation_mask: u8,
+    pub operation_mask: u16,
     pub public_material_len: u8,
 }
 
-pub const ALGORITHM_OP_GENERATE: u8 = 0x01;
-pub const ALGORITHM_OP_SIGN: u8 = 0x02;
-pub const ALGORITHM_OP_VERIFY: u8 = 0x04;
-pub const ALGORITHM_OP_ENCRYPT: u8 = 0x08;
-pub const ALGORITHM_OP_DECRYPT: u8 = 0x10;
-pub const ALGORITHM_OP_WRAPPED_IMPORT: u8 = 0x20;
-pub const MAX_ALGORITHM_PROFILES: usize = 5;
+pub const ALGORITHM_OP_GENERATE: u16 = 0x0001;
+pub const ALGORITHM_OP_SIGN: u16 = 0x0002;
+pub const ALGORITHM_OP_VERIFY: u16 = 0x0004;
+pub const ALGORITHM_OP_ENCRYPT: u16 = 0x0008;
+pub const ALGORITHM_OP_DECRYPT: u16 = 0x0010;
+pub const ALGORITHM_OP_WRAPPED_IMPORT: u16 = 0x0020;
+pub const ALGORITHM_OP_MAC: u16 = 0x0040;
+pub const ALGORITHM_OP_VERIFY_MAC: u16 = 0x0080;
+pub const ALGORITHM_OP_DERIVE: u16 = 0x0100;
+pub const ALGORITHM_OP_WRAPPED_EXPORT: u16 = 0x0200;
+pub const MAX_ALGORITHM_PROFILES: usize = 7;
 pub const REVIEWED_ALGORITHM_PROFILES: [AlgorithmProfile; MAX_ALGORITHM_PROFILES] = [
     AlgorithmProfile {
         algorithm: KeyAlgorithm::Ed25519,
@@ -1487,6 +1527,16 @@ pub const REVIEWED_ALGORITHM_PROFILES: [AlgorithmProfile; MAX_ALGORITHM_PROFILES
         operation_mask: ALGORITHM_OP_GENERATE | ALGORITHM_OP_ENCRYPT | ALGORITHM_OP_DECRYPT,
         public_material_len: 32,
     },
+    AlgorithmProfile {
+        algorithm: KeyAlgorithm::HmacSha256,
+        operation_mask: ALGORITHM_OP_GENERATE | ALGORITHM_OP_MAC | ALGORITHM_OP_VERIFY_MAC,
+        public_material_len: 0,
+    },
+    AlgorithmProfile {
+        algorithm: KeyAlgorithm::P256EcdhHkdfSha256,
+        operation_mask: ALGORITHM_OP_GENERATE | ALGORITHM_OP_DERIVE,
+        public_material_len: 33,
+    },
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1498,6 +1548,12 @@ pub struct ImportWrappedKeyRequest {
     pub target_export_policy: ExportPolicy,
     pub ciphertext: Vec<u8, MAX_WRAPPED_CIPHERTEXT_LEN>,
     pub integrity_tag: Vec<u8, MAX_WRAPPED_TAG_LEN>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExportWrappedKeyRequest {
+    pub wrapping_key_id: u8,
+    pub target_key_id: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2399,7 +2455,7 @@ impl PersistentKeyStore {
             KeyAlgorithm::Ed25519 => ed25519_public_key_from_seed(record.material.material_bytes.as_slice())
                 .and_then(|bytes| Vec::from_slice(&bytes).ok())
                 .unwrap_or_default(),
-            KeyAlgorithm::P256 => p256_public_key_from_secret(record.material.material_bytes.as_slice())
+            KeyAlgorithm::P256 | KeyAlgorithm::P256EcdhHkdfSha256 => p256_public_key_from_secret(record.material.material_bytes.as_slice())
                 .and_then(|bytes| Vec::from_slice(&bytes).ok())
                 .unwrap_or_default(),
             KeyAlgorithm::X25519ChaCha20Poly1305 => {
@@ -2407,7 +2463,7 @@ impl PersistentKeyStore {
                     .and_then(|bytes| Vec::from_slice(&bytes).ok())
                     .unwrap_or_default()
             }
-            KeyAlgorithm::ChaCha20Poly1305 | KeyAlgorithm::Aes256Gcm => {
+            KeyAlgorithm::ChaCha20Poly1305 | KeyAlgorithm::Aes256Gcm | KeyAlgorithm::HmacSha256 => {
                 Vec::new()
             }
         };

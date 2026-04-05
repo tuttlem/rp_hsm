@@ -298,18 +298,24 @@ pub fn execute(parsed: ParsedArgs) -> Result<CommandOutput, CliError> {
                 .get_random(auth.role, &proof, bytes)?;
             Ok(CommandOutput::Bytes(bytes))
         }
-        CommandSpec::GenerateKey { algorithm, usage, auth } => {
+        CommandSpec::GenerateKey {
+            algorithm,
+            usage,
+            export_policy,
+            auth,
+        } => {
             let proof = load_proof(&auth)?;
             let usage_mask = parse_usage_mask(&usage)?;
             let devices = discover_devices(parsed.global.baud)?;
             let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
             let result = SerialBackend::new(crate::client::ClientConfig::new(selected.clone(), parsed.global.baud))
-                .generate_key(&proof, algorithm, usage_mask)?;
+                .generate_key(&proof, algorithm, usage_mask, export_policy)?;
             Ok(lines_output(&[
                 format!("device={selected}"),
                 format!("key_id={}", result.key_id),
                 format!("algorithm={}", algorithm_name(algorithm as u8)),
                 format!("usage_mask=0x{usage_mask:02x}"),
+                format!("export_policy={}", export_policy_name(export_policy as u8)),
                 format!("lifecycle={}", key_lifecycle_name(result.lifecycle_state)),
                 format!("record_revision={}", result.record_revision),
                 format!("store_revision={}", result.store_revision),
@@ -343,6 +349,19 @@ pub fn execute(parsed: ParsedArgs) -> Result<CommandOutput, CliError> {
                 .asym_encrypt(&proof, key_id, algorithm, &plaintext)?;
             Ok(CommandOutput::Bytes(encode_symmetric_blob(&result.nonce, &result.ciphertext)?))
         }
+        CommandSpec::SenderEncrypt {
+            algorithm,
+            public_key_hex,
+        } => {
+            let plaintext = read_stdin_required()?;
+            let public_key = parse_hex_bytes(&public_key_hex)?;
+            let result = SerialBackend::new(crate::client::ClientConfig::new(
+                "/dev/null".to_string(),
+                parsed.global.baud,
+            ))
+            .sender_encrypt_to_public(algorithm, &public_key, &plaintext)?;
+            Ok(CommandOutput::Bytes(encode_symmetric_blob(&result.nonce, &result.ciphertext)?))
+        }
         CommandSpec::AsymDecrypt { key_id, algorithm, auth } => {
             let proof = load_proof(&auth)?;
             let blob = read_stdin_required()?;
@@ -365,6 +384,42 @@ pub fn execute(parsed: ParsedArgs) -> Result<CommandOutput, CliError> {
             let page = SerialBackend::new(crate::client::ClientConfig::new(selected.clone(), parsed.global.baud))
                 .get_audit_page(auth.role, &proof, start_sequence, max_events)?;
             Ok(lines_output(&audit_page_lines(&selected, &page, one_line)))
+        }
+        CommandSpec::Mac { key_id, auth } => {
+            let proof = load_proof(&auth)?;
+            let message = read_stdin_required()?;
+            let devices = discover_devices(parsed.global.baud)?;
+            let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
+            let mac = SerialBackend::new(crate::client::ClientConfig::new(selected, parsed.global.baud))
+                .generate_mac(key_id, &proof, &message)?;
+            Ok(CommandOutput::Bytes(mac))
+        }
+        CommandSpec::VerifyMac { key_id, mac_hex, auth } => {
+            let proof = load_proof(&auth)?;
+            let message = read_stdin_required()?;
+            let mac = parse_hex_bytes(&mac_hex)?;
+            let devices = discover_devices(parsed.global.baud)?;
+            let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
+            let verified = SerialBackend::new(crate::client::ClientConfig::new(selected, parsed.global.baud))
+                .verify_mac(key_id, &proof, &message, &mac)?;
+            Ok(lines_output(&[verified.to_string()]))
+        }
+        CommandSpec::Derive {
+            key_id,
+            algorithm,
+            peer_public_key_hex,
+            context_hex,
+            bytes,
+            auth,
+        } => {
+            let proof = load_proof(&auth)?;
+            let peer_public = parse_hex_bytes(&peer_public_key_hex)?;
+            let context = parse_hex_bytes(&context_hex)?;
+            let devices = discover_devices(parsed.global.baud)?;
+            let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
+            let derived = SerialBackend::new(crate::client::ClientConfig::new(selected, parsed.global.baud))
+                .derive_shared_secret(&proof, key_id, algorithm, &peer_public, &context, bytes)?;
+            Ok(CommandOutput::Bytes(derived))
         }
         CommandSpec::Sign { key_id, auth } => {
             let proof = load_proof(&auth)?;
@@ -393,6 +448,18 @@ pub fn execute(parsed: ParsedArgs) -> Result<CommandOutput, CliError> {
             let result = SerialBackend::new(crate::client::ClientConfig::new(selected.clone(), parsed.global.baud))
                 .import_wrapped_key(&proof, &envelope)?;
             Ok(lines_output(&[format_key_record_result(&selected, result)]))
+        }
+        CommandSpec::ExportWrappedKey {
+            key_id,
+            wrapping_key_id,
+            auth,
+        } => {
+            let proof = load_proof(&auth)?;
+            let devices = discover_devices(parsed.global.baud)?;
+            let selected = resolve_device_selector(parsed.global.device.as_deref(), &devices)?;
+            let envelope = SerialBackend::new(crate::client::ClientConfig::new(selected, parsed.global.baud))
+                .export_wrapped_key(&proof, wrapping_key_id, key_id)?;
+            Ok(CommandOutput::Bytes(envelope))
         }
         CommandSpec::ListKeys { auth } => {
             let proof = load_proof(&auth)?;
@@ -819,29 +886,43 @@ fn algorithm_name(value: u8) -> &'static str {
         0x03 => "chacha20poly1305",
         0x04 => "aes256gcm",
         0x05 => "x25519-chacha20poly1305",
+        0x06 => "hmac-sha256",
+        0x07 => "p256-ecdh-hkdf-sha256",
         _ => "unknown",
     }
 }
 
-fn algorithm_operation_names(mask: u8) -> String {
+fn algorithm_operation_names(mask: u16) -> String {
     let mut names = Vec::new();
-    if mask & 0x01 != 0 {
+    if mask & 0x0001 != 0 {
         names.push("generate");
     }
-    if mask & 0x02 != 0 {
+    if mask & 0x0002 != 0 {
         names.push("sign");
     }
-    if mask & 0x04 != 0 {
+    if mask & 0x0004 != 0 {
         names.push("verify");
     }
-    if mask & 0x08 != 0 {
+    if mask & 0x0008 != 0 {
         names.push("encrypt");
     }
-    if mask & 0x10 != 0 {
+    if mask & 0x0010 != 0 {
         names.push("decrypt");
     }
-    if mask & 0x20 != 0 {
+    if mask & 0x0020 != 0 {
         names.push("wrapped-import");
+    }
+    if mask & 0x0040 != 0 {
+        names.push("mac");
+    }
+    if mask & 0x0080 != 0 {
+        names.push("verify-mac");
+    }
+    if mask & 0x0100 != 0 {
+        names.push("derive");
+    }
+    if mask & 0x0200 != 0 {
+        names.push("wrapped-export");
     }
     if names.is_empty() {
         "none".to_string()
@@ -858,7 +939,9 @@ fn parse_usage_mask(value: &str) -> Result<u8, CliError> {
             "verify" => mask |= 0x02,
             "encrypt" => mask |= 0x04,
             "decrypt" => mask |= 0x08,
+            "derive" => mask |= 0x10,
             "wrapped-import" | "wrap-import" => mask |= 0x20,
+            "mac" => mask |= 0x40,
             "" => return Err(CliError::usage("usage entries must not be empty")),
             _ => return Err(CliError::usage("invalid usage value")),
         }
@@ -867,6 +950,14 @@ fn parse_usage_mask(value: &str) -> Result<u8, CliError> {
         return Err(CliError::usage("usage mask must not be empty"));
     }
     Ok(mask)
+}
+
+fn export_policy_name(value: u8) -> &'static str {
+    match value {
+        0x01 => "non-exportable",
+        0x02 => "wrapped-only",
+        _ => "unknown",
+    }
 }
 
 fn encode_symmetric_blob(nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CliError> {
@@ -902,14 +993,6 @@ fn origin_name(value: u8) -> &'static str {
     match value {
         0x01 => "generated",
         0x02 => "imported",
-        _ => "unknown",
-    }
-}
-
-fn export_policy_name(value: u8) -> &'static str {
-    match value {
-        0x01 => "non-exportable",
-        0x02 => "wrapped-only",
         _ => "unknown",
     }
 }

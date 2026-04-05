@@ -64,6 +64,8 @@ pub enum CommandId {
     RecoverTrustedFirmware = 0x9e,
     DeveloperUpdateFault = 0x9f,
     GenerateKey = 0xa0,
+    GenerateMac = 0xa1,
+    VerifyMac = 0xa2,
 }
 
 impl CommandId {
@@ -117,6 +119,8 @@ impl CommandId {
             0x9e => Some(Self::RecoverTrustedFirmware),
             0x9f => Some(Self::DeveloperUpdateFault),
             0xa0 => Some(Self::GenerateKey),
+            0xa1 => Some(Self::GenerateMac),
+            0xa2 => Some(Self::VerifyMac),
             _ => None,
         }
     }
@@ -659,7 +663,7 @@ pub const GENERATE_KEY: CommandDefinition = CommandDefinition {
     id: CommandId::GenerateKey,
     family: CommandFamily::Crypto,
     min_payload_len: AUTH_HEADER_LEN + 2,
-    max_payload_len: AUTH_HEADER_LEN + 2,
+    max_payload_len: AUTH_HEADER_LEN + 3,
     allowed_device_states: OPERATIONAL_ONLY,
     required_role: AuthorityRole::KeyManager,
     replay_policy: ReplayPolicy::SingleUse,
@@ -704,12 +708,12 @@ pub const EXPORT_WRAPPED_KEY: CommandDefinition = CommandDefinition {
     id: CommandId::ExportWrappedKey,
     family: CommandFamily::Crypto,
     min_payload_len: AUTH_HEADER_LEN,
-    max_payload_len: AUTH_HEADER_LEN,
+    max_payload_len: AUTH_HEADER_LEN + 2,
     allowed_device_states: OPERATIONAL_ONLY,
     required_role: AuthorityRole::KeyManager,
     replay_policy: ReplayPolicy::SingleUse,
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
-    enabled: false,
+    enabled: true,
     developer_only: false,
     requires_key_context: true,
     protected_action_class: ProtectedActionClass::None,
@@ -749,12 +753,42 @@ pub const DERIVE_SHARED_SECRET: CommandDefinition = CommandDefinition {
     id: CommandId::DeriveSharedSecret,
     family: CommandFamily::Crypto,
     min_payload_len: AUTH_HEADER_LEN,
-    max_payload_len: AUTH_HEADER_LEN,
+    max_payload_len: AUTH_HEADER_LEN + 1 + 1 + 1 + 33 + 1 + 32 + 1,
     allowed_device_states: OPERATIONAL_ONLY,
     required_role: AuthorityRole::KeyManager,
     replay_policy: ReplayPolicy::SingleUse,
     idempotency_policy: IdempotencyPolicy::NonIdempotent,
-    enabled: false,
+    enabled: true,
+    developer_only: false,
+    requires_key_context: true,
+    protected_action_class: ProtectedActionClass::None,
+};
+
+pub const GENERATE_MAC: CommandDefinition = CommandDefinition {
+    id: CommandId::GenerateMac,
+    family: CommandFamily::Crypto,
+    min_payload_len: AUTH_HEADER_LEN + 1 + 1 + 2 + 1,
+    max_payload_len: AUTH_HEADER_LEN + 1 + 1 + 2 + 128,
+    allowed_device_states: OPERATIONAL_ONLY,
+    required_role: AuthorityRole::KeyManager,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
+    developer_only: false,
+    requires_key_context: true,
+    protected_action_class: ProtectedActionClass::None,
+};
+
+pub const VERIFY_MAC: CommandDefinition = CommandDefinition {
+    id: CommandId::VerifyMac,
+    family: CommandFamily::Crypto,
+    min_payload_len: AUTH_HEADER_LEN + 1 + 1 + 2 + 1 + 1 + 1,
+    max_payload_len: AUTH_HEADER_LEN + 1 + 1 + 2 + 128 + 1 + 32,
+    allowed_device_states: OPERATIONAL_ONLY,
+    required_role: AuthorityRole::KeyManager,
+    replay_policy: ReplayPolicy::SingleUse,
+    idempotency_policy: IdempotencyPolicy::NonIdempotent,
+    enabled: true,
     developer_only: false,
     requires_key_context: true,
     protected_action_class: ProtectedActionClass::None,
@@ -954,6 +988,8 @@ pub fn definition_for(id: CommandId) -> CommandDefinition {
         CommandId::AbortFirmwareUpdate => ABORT_FIRMWARE_UPDATE,
         CommandId::RecoverTrustedFirmware => RECOVER_TRUSTED_FIRMWARE,
         CommandId::DeveloperUpdateFault => DEVELOPER_UPDATE_FAULT,
+        CommandId::GenerateMac => GENERATE_MAC,
+        CommandId::VerifyMac => VERIFY_MAC,
     }
 }
 
@@ -1072,6 +1108,21 @@ pub fn get_visible_catalog(
                     DEVELOPER_REBOOT,
                     DEVELOPER_SET_POLICY,
                     DEVELOPER_UPDATE_FAULT,
+                    PUT_PERSISTENT_KEY,
+                    LIST_PERSISTENT_KEYS,
+                    GET_KEY_METADATA,
+                    REVOKE_PERSISTENT_KEY,
+                    DESTROY_PERSISTENT_KEY,
+                    GENERATE_KEY,
+                    SIGN_DETACHED,
+                    GENERATE_RANDOM,
+                    IMPORT_WRAPPED_KEY,
+                    EXPORT_WRAPPED_KEY,
+                    ENCRYPT,
+                    DECRYPT,
+                    DERIVE_SHARED_SECRET,
+                    GENERATE_MAC,
+                    VERIFY_MAC,
                 ]
             } else {
                 PUBLIC_COMMANDS
@@ -1100,8 +1151,12 @@ pub fn get_visible_catalog(
             SIGN_DETACHED,
             GENERATE_RANDOM,
             IMPORT_WRAPPED_KEY,
+            EXPORT_WRAPPED_KEY,
             ENCRYPT,
             DECRYPT,
+            DERIVE_SHARED_SECRET,
+            GENERATE_MAC,
+            VERIFY_MAC,
             GET_FIRMWARE_UPDATE_STATUS,
         ]),
     }

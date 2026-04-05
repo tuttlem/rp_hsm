@@ -22,6 +22,7 @@ Use this checklist before marking a candidate approved.
 - [ ] Parser abuse and malformed-input coverage is recorded
 - [ ] Authorization and misuse coverage is recorded
 - [ ] New crypto-envelope parsing and denial coverage is recorded when the candidate adds or changes encrypt/decrypt surfaces
+- [ ] Sender-side helpers, MAC/derive workflows, and wrapped-export denial coverage are recorded when the candidate adds or changes those surfaces
 - [ ] Invalid-state handling coverage is recorded
 - [ ] Persistence corruption and recovery coverage is recorded
 - [ ] Firmware update recovery coverage is recorded when applicable
