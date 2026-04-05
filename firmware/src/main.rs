@@ -48,9 +48,74 @@ pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
 #[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
 const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 #[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
-const LED_ON_TICKS: u64 = 100_000;
+const LED_PULSE_ON_TICKS: u64 = 60_000;
 #[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
-const LED_OFF_TICKS: u64 = 900_000;
+const LED_PULSE_GAP_TICKS: u64 = 120_000;
+
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+const LED_SUCCESS_PULSES: u8 = 1;
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+const LED_ERROR_PULSES: u8 = 2;
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+const LED_MAX_PENDING_PULSES: u8 = 4;
+
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+struct LedUi {
+    is_on: bool,
+    phase_deadline: u64,
+    pending_pulses: u8,
+}
+
+#[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
+impl LedUi {
+    const fn new(now: u64) -> Self {
+        Self {
+            is_on: false,
+            phase_deadline: now,
+            pending_pulses: 0,
+        }
+    }
+
+    fn trigger_success(&mut self, now: u64) {
+        self.enqueue(now, LED_SUCCESS_PULSES);
+    }
+
+    fn trigger_error(&mut self, now: u64) {
+        self.enqueue(now, LED_ERROR_PULSES);
+    }
+
+    fn enqueue(&mut self, now: u64, count: u8) {
+        self.pending_pulses = self.pending_pulses.saturating_add(count).min(LED_MAX_PENDING_PULSES);
+        if !self.is_on {
+            self.phase_deadline = now;
+        }
+    }
+
+    fn tick(&mut self, now: u64, led: &mut impl OutputPin) {
+        if self.pending_pulses == 0 {
+            if self.is_on {
+                led.set_low().ok();
+                self.is_on = false;
+            }
+            return;
+        }
+
+        if now < self.phase_deadline {
+            return;
+        }
+
+        if self.is_on {
+            led.set_low().ok();
+            self.is_on = false;
+            self.pending_pulses = self.pending_pulses.saturating_sub(1);
+            self.phase_deadline = now + LED_PULSE_GAP_TICKS;
+        } else {
+            led.set_high().ok();
+            self.is_on = true;
+            self.phase_deadline = now + LED_PULSE_ON_TICKS;
+        }
+    }
+}
 
 #[cfg(all(target_os = "none", any(target_arch = "riscv32", target_arch = "arm")))]
 #[hal::entry]
@@ -185,8 +250,7 @@ fn main() -> ! {
         approval_tickets: protocol_engine.approval_tickets().clone(),
         next_approval_ticket_id: protocol_engine.next_approval_ticket_id(),
     });
-    let mut led_is_on = false;
-    let mut next_toggle_at = timer.get_counter().ticks();
+    let mut led_ui = LedUi::new(timer.get_counter().ticks());
     #[cfg(feature = "developer-mode")]
     let mut host_connected = false;
 
@@ -332,6 +396,12 @@ fn main() -> ! {
                 if let Some(encoded) = protocol::protocol::encode_frame(&response) {
                     let _ = serial.write(&encoded);
                 }
+                let now = timer.get_counter().ticks();
+                if response.code == StatusCode::Success.as_u8() {
+                    led_ui.trigger_success(now);
+                } else {
+                    led_ui.trigger_error(now);
+                }
                 clear_transient_buffer(&mut frame_buf[..frame_len]);
                 frame_len = 0;
                 if reboot_requested && response.code == StatusCode::Success.as_u8() {
@@ -352,17 +422,7 @@ fn main() -> ! {
         logging::flush();
 
         let now = timer.get_counter().ticks();
-        if now >= next_toggle_at {
-            led_is_on = !led_is_on;
-
-            if led_is_on {
-                led.set_high().ok();
-                next_toggle_at = now + LED_ON_TICKS;
-            } else {
-                led.set_low().ok();
-                next_toggle_at = now + LED_OFF_TICKS;
-            }
-        }
+        led_ui.tick(now, &mut led);
     }
 }
 
