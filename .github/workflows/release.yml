@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  firmware:
+    name: Firmware
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv32imac-unknown-none-elf
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build and package release firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cargo build -p firmware --release --target riscv32imac-unknown-none-elf
+          cp target/riscv32imac-unknown-none-elf/release/rp_hsm dist/rp_hsm-release.elf
+          cargo clean -p firmware
+          cargo build -p firmware --release --target riscv32imac-unknown-none-elf --features developer-mode
+          cp target/riscv32imac-unknown-none-elf/release/rp_hsm dist/rp_hsm-developer.elf
+          sha256sum dist/rp_hsm-release.elf dist/rp_hsm-developer.elf > dist/firmware-SHA256SUMS.txt
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-artifacts
+          path: dist/
+
+  host-tools:
+    name: Host Tools (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            archive_name: rphsmtool-linux-x86_64.tar.gz
+          - os: macos-latest
+            archive_name: rphsmtool-macos.tar.gz
+          - os: windows-latest
+            archive_name: rphsmtool-windows-x86_64.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build host tools release binaries
+        run: cargo build -p host_tools --release --bins
+
+      - name: Package host tools archive (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/rphsmtool dist/rphsmtool
+          cp target/release/probe_protocol dist/probe_protocol
+          tar -C dist -czf "${{ matrix.archive_name }}" rphsmtool probe_protocol
+
+      - name: Package host tools archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/rphsmtool.exe dist/rphsmtool.exe
+          Copy-Item target/release/probe_protocol.exe dist/probe_protocol.exe
+          Compress-Archive -Path dist/rphsmtool.exe,dist/probe_protocol.exe -DestinationPath ${{ matrix.archive_name }} -Force
+
+      - name: Upload host tools artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive_name }}
+          path: ${{ matrix.archive_name }}
+
+  publish:
+    name: Publish Release Assets
+    runs-on: ubuntu-latest
+    needs:
+      - firmware
+      - host-tools
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          find artifacts -type f -maxdepth 2 -print -exec cp {} release-assets/ \;
+          ls -l release-assets
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true

@@ -49,6 +49,37 @@ Minimum release expectations:
 - dependency review and build review must be recorded
 - missing evidence blocks approval unless an explicit scoped exception exists
 
+## GitHub CI/CD
+
+The repo now includes GitHub Actions workflows for validation and downloadable build artifacts:
+
+- `.github/workflows/ci.yml`
+  - runs tests and clippy
+  - builds the developer firmware image
+  - builds release host-tool binaries
+  - uploads per-run artifacts so they can be downloaded from the workflow page
+- `.github/workflows/release.yml`
+  - runs on tags matching `v*`
+  - builds firmware artifacts and host tools
+  - publishes downloadable assets to the GitHub Release
+
+Expected downloadable outputs:
+
+- `rp_hsm-release.elf`
+- `rp_hsm-developer.elf`
+- `rphsmtool-linux-x86_64.tar.gz`
+- `rphsmtool-macos.tar.gz`
+- `rphsmtool-windows-x86_64.zip`
+
+Recommended release flow:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+That will trigger the release workflow and attach the built artifacts to the GitHub release for that tag.
+
 ## Common Commands
 
 ### Build firmware
