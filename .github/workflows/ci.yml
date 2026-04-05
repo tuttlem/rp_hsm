@@ -69,6 +69,14 @@ jobs:
             dist/firmware/rp_hsm-developer.elf \
             dist/rphsmtool-linux-x86_64.tar.gz > dist/SHA256SUMS.txt
 
+      - name: Verify CI firmware artifact shape
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -lh dist/firmware
+          file dist/firmware/rp_hsm-developer.elf
+          test "$(stat -c%s dist/firmware/rp_hsm-developer.elf)" -gt 100000
+
       - name: Upload CI artifacts
         uses: actions/upload-artifact@v4
         with:

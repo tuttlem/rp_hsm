@@ -43,6 +43,15 @@ jobs:
           cp target/riscv32imac-unknown-none-elf/release/rp_hsm dist/rp_hsm-developer.elf
           sha256sum dist/rp_hsm-release.elf dist/rp_hsm-developer.elf > dist/firmware-SHA256SUMS.txt
 
+      - name: Verify firmware artifact shape
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -lh dist
+          file dist/rp_hsm-release.elf dist/rp_hsm-developer.elf
+          test "$(stat -c%s dist/rp_hsm-release.elf)" -gt 100000
+          test "$(stat -c%s dist/rp_hsm-developer.elf)" -gt 100000
+
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
