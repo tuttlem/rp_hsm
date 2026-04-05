@@ -65,11 +65,16 @@ The repo now includes GitHub Actions workflows for validation and downloadable b
 
 Expected downloadable outputs:
 
-- `rp_hsm-release.elf`
 - `rp_hsm-developer.elf`
 - `rphsmtool-linux-x86_64.tar.gz`
 - `rphsmtool-macos.tar.gz`
 - `rphsmtool-windows-x86_64.zip`
+
+Current firmware-release note:
+
+- only `rp_hsm-developer.elf` is published as a downloadable firmware artifact
+- the non-`developer-mode` firmware build does not yet include the full usable HSM control surface
+- do not treat the plain non-developer firmware image as a production-ready release until the production transport and command surface are implemented outside `developer-mode`
 
 Recommended release flow:
 

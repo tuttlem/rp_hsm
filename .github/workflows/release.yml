@@ -31,25 +31,21 @@ jobs:
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Build and package release firmware
+      - name: Build and package developer firmware
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          cargo build -p firmware --release --target riscv32imac-unknown-none-elf
-          cp target/riscv32imac-unknown-none-elf/release/rp_hsm dist/rp_hsm-release.elf
-          cargo clean -p firmware
           cargo build -p firmware --release --target riscv32imac-unknown-none-elf --features developer-mode
           cp target/riscv32imac-unknown-none-elf/release/rp_hsm dist/rp_hsm-developer.elf
-          sha256sum dist/rp_hsm-release.elf dist/rp_hsm-developer.elf > dist/firmware-SHA256SUMS.txt
+          sha256sum dist/rp_hsm-developer.elf > dist/firmware-SHA256SUMS.txt
 
-      - name: Verify firmware artifact shape
+      - name: Verify developer firmware artifact shape
         shell: bash
         run: |
           set -euo pipefail
           ls -lh dist
-          file dist/rp_hsm-release.elf dist/rp_hsm-developer.elf
-          test "$(stat -c%s dist/rp_hsm-release.elf)" -gt 100000
+          file dist/rp_hsm-developer.elf
           test "$(stat -c%s dist/rp_hsm-developer.elf)" -gt 100000
 
       - name: Upload firmware artifacts
